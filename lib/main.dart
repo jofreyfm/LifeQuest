@@ -63,7 +63,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   void initState() {
     super.initState();
     refresh().then((_) => checkReminders());
-    reminderTimer = Timer.periodic(const Duration(minutes: 1), (_) => checkReminders());
+    reminderTimer = Timer.periodic(const Duration(seconds: 15), (_) => checkReminders());
   }
 
   @override

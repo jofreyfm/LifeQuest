@@ -133,7 +133,7 @@ class DatabaseService {
     return db.transaction((txn) async {
       final due = await txn.rawQuery('''SELECT r.mission_id FROM mission_reminders r
         JOIN missions m ON m.id = r.mission_id
-        WHERE r.enabled = 1 AND (r.hour * 60 + r.minute) <= ?
+        WHERE r.enabled = 1 AND (r.hour * 60 + r.minute) = ?
         AND (r.last_notified IS NULL OR r.last_notified <> ?)
         AND NOT (m.frequency = 'Única' AND m.completed = 1)''',
         [now.hour * 60 + now.minute, today]);
