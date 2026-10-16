@@ -37,6 +37,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   List<Mission> missions = [];
   int coins = 0, xp = 0, tab = 0;
   bool loading = true;
+  List<CompletionRecord> history = [];
 
   @override
   void initState() {
@@ -48,11 +49,13 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     try {
       final items = await db.getMissions();
       final wallet = await db.getWallet();
+      final records = await db.getHistory();
       if (!mounted) return;
       setState(() {
         missions = items;
         coins = wallet['coins']!;
         xp = wallet['xp']!;
+        history = records;
         loading = false;
       });
     } catch (error) {
@@ -103,9 +106,13 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       ),
     );
     if (result == null) return;
-    final completed = await db.updateProgress(mission, result);
-    await refresh();
-    if (completed) message('Missão concluída! +${mission.points} moedas e XP');
+    try {
+      final completed = await db.updateProgress(mission, result);
+      await refresh();
+      if (completed) message('Missão concluída! +${mission.points} moedas e XP');
+    } catch (error) {
+      message('Erro ao atualizar progresso: $error');
+    }
   }
 
   Future<void> removeMission(Mission mission) async {
@@ -118,10 +125,29 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       ],
     ));
     if (confirmed == true) {
-      await db.deleteMission(mission.id!);
-      await refresh();
+      try {
+        await db.deleteMission(mission.id!);
+        await refresh();
+      } catch (error) {
+        message('Erro ao excluir missão: $error');
+      }
     }
   }
+
+  String formatDate(DateTime date) => '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year} às ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+
+  Widget historyPage() => ListView(padding: const EdgeInsets.all(16), children: [
+    const Text('Histórico de conclusões', style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
+    const SizedBox(height: 12),
+    if (history.isEmpty) const Card(child: Padding(
+      padding: EdgeInsets.all(20), child: Text('Você ainda não concluiu missões.'))),
+    ...history.map((record) => Card(child: ListTile(
+      leading: const Icon(Icons.check_circle, color: Colors.green),
+      title: Text(record.title),
+      subtitle: Text(formatDate(record.when)),
+      trailing: Text('+${record.points}', style: const TextStyle(color: LifeQuestApp.purple)),
+    ))),
+  ]);
 
   Widget missionCard(Mission mission) => Card(
     child: Padding(
@@ -206,18 +232,24 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('LifeQuest'), backgroundColor: LifeQuestApp.bg),
+    appBar: AppBar(
+      title: Text(tab == 5 ? 'Histórico' : 'LifeQuest'),
+      backgroundColor: LifeQuestApp.bg,
+      actions: [IconButton(tooltip: 'Histórico', icon: const Icon(Icons.history),
+        onPressed: () => setState(() => tab = 5))],
+    ),
     body: loading ? const Center(child: CircularProgressIndicator()) : [
       overview(), missionList(),
       placeholder('Loja', Icons.shopping_bag_outlined),
       placeholder('Calendário', Icons.calendar_month_outlined),
       placeholder('Estatísticas', Icons.bar_chart_outlined),
+      historyPage(),
     ][tab],
     floatingActionButton: tab <= 1 ? FloatingActionButton.extended(
       onPressed: () => editMission(), icon: const Icon(Icons.add), label: const Text('Nova missão'),
     ) : null,
     bottomNavigationBar: NavigationBar(
-      selectedIndex: tab,
+      selectedIndex: tab == 5 ? 1 : tab,
       onDestinationSelected: (index) => setState(() => tab = index),
       destinations: const [
         NavigationDestination(icon: Icon(Icons.home_outlined), label: 'Início'),
