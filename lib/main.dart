@@ -510,7 +510,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
           const SizedBox(width: 10), const Expanded(child: Text('Meta semanal',
             style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
           IconButton(tooltip: 'Editar meta', icon: const Icon(Icons.settings_outlined),
-            onPressed: claimed ? null : editWeeklyGoal)]),
+            onPressed: editWeeklyGoal)]),
         Text('$completed de $target missões • Bônus: $bonus moedas'),
         const SizedBox(height: 10),
         LinearProgressIndicator(value: (completed / target).clamp(0.0, 1.0), minHeight: 7),
@@ -1161,29 +1161,78 @@ class _FocusTimerDialogState extends State<FocusTimerDialog> {
   Timer? ticker;
   int accumulatedSeconds = 0;
   bool saving = false;
+  bool loading = true;
 
   @override
   void initState() {
     super.initState();
+    _restore();
     ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted && watch.isRunning) setState(() {});
     });
   }
 
+  Future<void> _restore() async {
+    try {
+      final saved = await widget.db.getFocusDraft(widget.mission.id!);
+      if (mounted) setState(() { accumulatedSeconds = saved; loading = false; });
+    } catch (e) {
+      if (mounted) {
+        setState(() => loading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      }
+    }
+  }
+
   int get seconds => accumulatedSeconds + watch.elapsed.inSeconds;
 
-  Future<void> finish() async {
-    if (saving) return;
+  void _pauseWatch() {
+    if (watch.isRunning) {
+      accumulatedSeconds += watch.elapsed.inSeconds;
+      watch.stop();
+      watch.reset();
+    }
+  }
+
+  Future<void> _pause() async {
+    if (saving || loading) return;
     setState(() => saving = true);
-    watch.stop();
+    _pauseWatch();
     try {
-      await widget.db.saveFocusSession(widget.mission.id!, widget.mission.title, seconds);
+      await widget.db.saveFocusDraft(widget.mission.id!, seconds);
+      if (mounted) setState(() => saving = false);
+    } catch (e) { _error(e); }
+  }
+
+  Future<void> _resume() async {
+    if (saving || loading) return;
+    setState(() => watch.start());
+  }
+
+  Future<void> _leave() async {
+    if (saving || loading) return;
+    setState(() => saving = true);
+    _pauseWatch();
+    try {
+      await widget.db.saveFocusDraft(widget.mission.id!, seconds);
       if (mounted) Navigator.pop(context);
-    } catch (error) {
-      if (mounted) {
-        setState(() => saving = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
-      }
+    } catch (e) { _error(e); }
+  }
+
+  Future<void> finish() async {
+    if (saving || loading) return;
+    setState(() => saving = true);
+    _pauseWatch();
+    try {
+      await widget.db.finishFocusDraft(widget.mission.id!, widget.mission.title, seconds);
+      if (mounted) Navigator.pop(context);
+    } catch (e) { _error(e); }
+  }
+
+  void _error(Object e) {
+    if (mounted) {
+      setState(() => saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
     }
   }
 
@@ -1205,20 +1254,19 @@ class _FocusTimerDialogState extends State<FocusTimerDialog> {
       content: Column(mainAxisSize: MainAxisSize.min, children: [
         const Icon(Icons.timer_outlined, size: 42, color: LifeQuestApp.purple),
         const SizedBox(height: 14),
-        Text(display, style: const TextStyle(fontSize: 38, fontWeight: FontWeight.bold,
+        if (loading) const CircularProgressIndicator()
+        else Text(display, style: const TextStyle(fontSize: 38, fontWeight: FontWeight.bold,
           fontFeatures: [FontFeature.tabularFigures()])),
         const SizedBox(height: 10),
-        const Text('O tempo é salvo ao tocar em Finalizar.',
+        const Text('Sair salva o tempo e pausa a sessão. Ao voltar, você continua de onde parou.',
           textAlign: TextAlign.center, style: TextStyle(color: Colors.white70)),
       ]),
       actions: [
-        TextButton(onPressed: saving ? null : () {
-          setState(() {
-            if (watch.isRunning) { accumulatedSeconds += watch.elapsed.inSeconds; watch.reset(); watch.stop(); }
-            else { watch.start(); }
-          });
-        }, child: Text(watch.isRunning ? 'Pausar' : 'Iniciar / Retomar')),
-        FilledButton(onPressed: saving ? null : finish,
+        TextButton(onPressed: saving || loading ? null : _leave,
+          child: const Text('Sair e salvar')),
+        TextButton(onPressed: saving || loading ? null : (watch.isRunning ? _pause : _resume),
+          child: Text(watch.isRunning ? 'Pausar' : 'Iniciar / Retomar')),
+        FilledButton(onPressed: saving || loading ? null : finish,
           child: Text(saving ? 'Salvando...' : 'Finalizar')),
       ],
     ));

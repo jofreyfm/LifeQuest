@@ -40,7 +40,7 @@ class DatabaseService {
     final location = join(await getDatabasesPath(), 'lifequest.db');
     _database = await openDatabase(
       location,
-      version: 6,
+      version: 7,
       onCreate: (db, version) async {
         await db.execute('''CREATE TABLE missions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,6 +58,7 @@ class DatabaseService {
         await _createRewardTables(db);
         await _createStreakTables(db);
         await _createFocusTables(db);
+        await _createDraftTimerTable(db);
         await db.execute('''CREATE TABLE transactions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           mission_id INTEGER, points INTEGER NOT NULL,
@@ -84,6 +85,9 @@ class DatabaseService {
         }
         if (oldVersion < 6) {
           await _createFocusTables(db);
+        }
+        if (oldVersion < 7) {
+          await _createDraftTimerTable(db);
         }
       },
     );
@@ -135,6 +139,44 @@ class DatabaseService {
     await db.execute('''CREATE TABLE IF NOT EXISTS weekly_claims (
       week_key TEXT PRIMARY KEY, coins INTEGER NOT NULL, claimed_at TEXT NOT NULL
     )''');
+  }
+
+  static Future<void> _createDraftTimerTable(DatabaseExecutor db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS focus_drafts (
+      mission_id INTEGER PRIMARY KEY,
+      elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    )''');
+  }
+
+  Future<int> getFocusDraft(int missionId) async {
+    final rows = await (await database).query('focus_drafts',
+      columns: ['elapsed_seconds'], where: 'mission_id = ?', whereArgs: [missionId]);
+    return rows.isEmpty ? 0 : (rows.first['elapsed_seconds'] as int);
+  }
+
+  Future<void> saveFocusDraft(int missionId, int seconds) async {
+    if (seconds < 0) throw ArgumentError('Tempo inválido');
+    await (await database).insert('focus_drafts', {
+      'mission_id': missionId, 'elapsed_seconds': seconds,
+      'updated_at': DateTime.now().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> finishFocusDraft(int missionId, String title, int seconds) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      if ((await txn.query('missions', where: 'id = ?', whereArgs: [missionId])).isEmpty) {
+        throw StateError('Missão não encontrada.');
+      }
+      if (seconds > 0) {
+        await txn.insert('focus_sessions', {
+          'mission_id': missionId, 'title_snapshot': title,
+          'seconds': seconds, 'created_at': DateTime.now().toIso8601String(),
+        });
+      }
+      await txn.delete('focus_drafts', where: 'mission_id = ?', whereArgs: [missionId]);
+    });
   }
 
   Future<int> getMissionFocusSeconds(int missionId) async {
