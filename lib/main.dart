@@ -44,6 +44,9 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   List<OwnedReward> ownedRewards = [];
   int shopTab = 0;
   int totalRedemptions = 0;
+  StreakStatus streak = const StreakStatus(0, false, false);
+  Set<int> restDays = {};
+  List<InactivePeriod> inactivePeriods = [];
 
   @override
   void initState() {
@@ -59,6 +62,9 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       final rewardItems = await db.getRewards();
       final purchases = await db.getOwnedRewards();
       final redemptions = await db.getTotalRedemptions();
+      final streakInfo = await db.getStreakStatus();
+      final rests = await db.getRestDays();
+      final periods = await db.getInactivePeriods();
       if (!mounted) return;
       setState(() {
         missions = items;
@@ -68,6 +74,9 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         rewards = rewardItems;
         ownedRewards = purchases;
         totalRedemptions = redemptions;
+        streak = streakInfo;
+        restDays = rests;
+        inactivePeriods = periods;
         loading = false;
       });
     } catch (error) {
@@ -97,6 +106,10 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   }
 
   Future<void> changeProgress(Mission mission) async {
+    if (streak.inactiveToday) {
+      message('Tempo inativo ativado: missões e pontos estão pausados.');
+      return;
+    }
     double progress = mission.progress.toDouble();
     final result = await showDialog<int>(
       context: context,
@@ -458,7 +471,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
             const SizedBox(width: 8),
             IconButton(
               tooltip: 'Atualizar progresso',
-              onPressed: mission.completed ? null : () => changeProgress(mission),
+              onPressed: mission.completed || streak.inactiveToday ? null : () => changeProgress(mission),
               icon: const Icon(Icons.edit_note),
             ),
           ]),
@@ -492,6 +505,16 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         trailing: const Icon(Icons.chevron_right),
         onTap: () => setState(() => tab = 6),
       )),
+      const SizedBox(height: 12),
+      Card(child: ListTile(
+        leading: const Icon(Icons.local_fire_department, color: Colors.deepOrangeAccent),
+        title: Text('Sequência: ${streak.days} dias'),
+        subtitle: Text(streak.inactiveToday ? 'Tempo inativo: missões pausadas' :
+          streak.restingToday ? 'Dia de descanso: sequência preservada' :
+          'Conclua uma missão hoje para avançar'),
+        trailing: const Icon(Icons.settings_outlined),
+        onTap: () => setState(() => tab = 7),
+      )),
       const SizedBox(height: 20),
       Text('Missões ($finished/${missions.length} concluídas)',
         style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
@@ -509,6 +532,82 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     if (missions.isEmpty) const Text('Crie uma missão usando o botão +.'),
   ]);
 
+  Future<void> toggleRestDay(int day, bool value) async {
+    try {
+      await db.setRestDay(day, value);
+      await refresh();
+    } catch (e) { message('Erro ao atualizar descanso: $e'); }
+  }
+
+  Future<void> addInactive() async {
+    final now = DateTime.now();
+    final range = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(now.year - 2),
+      lastDate: DateTime(now.year + 5),
+      initialDateRange: DateTimeRange(start: now, end: now),
+      helpText: 'Selecionar tempo inativo',
+    );
+    if (range == null || !mounted) return;
+    try {
+      await db.addInactivePeriod(range.start, range.end);
+      await refresh();
+    } catch (e) { message('Erro ao salvar período: $e'); }
+  }
+
+  Future<void> removeInactive(InactivePeriod period) async {
+    final confirmed = await showDialog<bool>(context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remover tempo inativo?'),
+        content: const Text('Dias sem missões fora do período poderão interromper a sequência.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Remover')),
+        ],
+      ));
+    if (confirmed != true) return;
+    try {
+      await db.deleteInactivePeriod(period.id);
+      await refresh();
+    } catch (e) { message('Erro ao remover período: $e'); }
+  }
+
+  Widget streakSettings() {
+    const weekdays = ['Segunda-feira', 'Terça-feira', 'Quarta-feira',
+      'Quinta-feira', 'Sexta-feira', 'Sábado', 'Domingo'];
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      const Text('Sequência e pausas', style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 12),
+      Card(child: ListTile(
+        leading: const Icon(Icons.local_fire_department, color: Colors.deepOrangeAccent),
+        title: Text('${streak.days} dias de sequência'),
+        subtitle: Text(streak.inactiveToday ? 'Tempo inativo ativo' :
+          streak.restingToday ? 'Hoje é dia de descanso' : 'Hoje é dia ativo'),
+      )),
+      const SizedBox(height: 12),
+      const Text('Dias de descanso', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+      const Text('Preservam a sequência, mas não acrescentam dias. Missões ainda podem ser concluídas nesses dias.'),
+      ...List.generate(7, (i) => SwitchListTile(
+        title: Text(weekdays[i]),
+        value: restDays.contains(i + 1),
+        onChanged: (v) => toggleRestDay(i + 1, v),
+      )),
+      const SizedBox(height: 16),
+      const Text('Tempo inativo', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+      const Text('Viagens, acampamentos ou doenças: pausa missões e ganhos de moedas/XP; a sequência é preservada.'),
+      const SizedBox(height: 10),
+      FilledButton.icon(onPressed: addInactive, icon: const Icon(Icons.add),
+        label: const Text('Adicionar período')),
+      if (inactivePeriods.isEmpty) const Padding(padding: EdgeInsets.all(12),
+        child: Text('Nenhum período cadastrado.')),
+      ...inactivePeriods.map((p) => Card(child: ListTile(
+        title: Text('${p.startDay} até ${p.endDay}'),
+        trailing: IconButton(tooltip: 'Remover período',
+          onPressed: () => removeInactive(p), icon: const Icon(Icons.delete_outline)),
+      ))),
+    ]);
+  }
+
   Widget placeholder(String name, IconData icon) => Center(child: Column(
     mainAxisSize: MainAxisSize.min, children: [
       Icon(icon, size: 55, color: LifeQuestApp.purple),
@@ -521,9 +620,11 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
-      title: Text(tab == 5 ? 'Histórico' : tab == 6 ? 'Perfil' : 'LifeQuest'),
+      title: Text(tab == 5 ? 'Histórico' : tab == 6 ? 'Perfil' : tab == 7 ? 'Sequência' : 'LifeQuest'),
       backgroundColor: LifeQuestApp.bg,
       actions: [
+        IconButton(tooltip: 'Sequência e pausas', icon: const Icon(Icons.local_fire_department_outlined),
+          onPressed: () => setState(() => tab = 7)),
         IconButton(tooltip: 'Perfil e conquistas', icon: const Icon(Icons.person_outline),
           onPressed: () => setState(() => tab = 6)),
         IconButton(tooltip: 'Histórico', icon: const Icon(Icons.history),
@@ -535,7 +636,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       shopPage(),
       placeholder('Calendário', Icons.calendar_month_outlined),
       placeholder('Estatísticas', Icons.bar_chart_outlined),
-      historyPage(), profilePage(),
+      historyPage(), profilePage(), streakSettings(),
     ][tab],
     floatingActionButton: tab <= 2 ? FloatingActionButton.extended(
       onPressed: tab == 2 ? () => editReward() : () => editMission(),

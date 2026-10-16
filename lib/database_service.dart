@@ -3,6 +3,19 @@ import 'package:sqflite/sqflite.dart';
 import 'mission.dart';
 import 'reward.dart';
 
+
+class InactivePeriod {
+  final int id;
+  final String startDay, endDay;
+  const InactivePeriod(this.id, this.startDay, this.endDay);
+}
+
+class StreakStatus {
+  final int days;
+  final bool inactiveToday, restingToday;
+  const StreakStatus(this.days, this.inactiveToday, this.restingToday);
+}
+
 class CompletionRecord {
   final String title;
   final int points;
@@ -20,7 +33,7 @@ class DatabaseService {
     final location = join(await getDatabasesPath(), 'lifequest.db');
     _database = await openDatabase(
       location,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await db.execute('''CREATE TABLE missions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,6 +49,7 @@ class DatabaseService {
         )''');
         await db.insert('wallet', {'id': 1, 'coins': 0, 'xp': 0});
         await _createRewardTables(db);
+        await _createStreakTables(db);
         await db.execute('''CREATE TABLE transactions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           mission_id INTEGER, points INTEGER NOT NULL,
@@ -57,6 +71,9 @@ class DatabaseService {
         if (oldVersion < 4) {
           await db.execute('ALTER TABLE owned_rewards ADD COLUMN hidden_at TEXT');
         }
+        if (oldVersion < 5) {
+          await _createStreakTables(db);
+        }
       },
     );
     return _database!;
@@ -75,6 +92,89 @@ class DatabaseService {
       description_snapshot TEXT NOT NULL, price_paid INTEGER NOT NULL,
       purchased_at TEXT NOT NULL, used_at TEXT, hidden_at TEXT
     )''');
+  }
+
+
+  static Future<void> _createStreakTables(DatabaseExecutor db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS rest_days (
+      weekday INTEGER PRIMARY KEY CHECK(weekday BETWEEN 1 AND 7)
+    )''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS inactive_periods (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      start_day TEXT NOT NULL, end_day TEXT NOT NULL,
+      CHECK(start_day <= end_day)
+    )''');
+  }
+
+  Future<Set<int>> getRestDays() async {
+    final rows = await (await database).query('rest_days');
+    return rows.map((r) => r['weekday'] as int).toSet();
+  }
+
+  Future<void> setRestDay(int weekday, bool enabled) async {
+    if (weekday < 1 || weekday > 7) throw ArgumentError('Dia inválido');
+    final db = await database;
+    if (enabled) {
+      await db.insert('rest_days', {'weekday': weekday}, conflictAlgorithm: ConflictAlgorithm.ignore);
+    } else {
+      await db.delete('rest_days', where: 'weekday = ?', whereArgs: [weekday]);
+    }
+  }
+
+  Future<List<InactivePeriod>> getInactivePeriods() async {
+    final rows = await (await database).query('inactive_periods', orderBy: 'start_day DESC');
+    return rows.map((r) => InactivePeriod(r['id'] as int,
+      r['start_day'] as String, r['end_day'] as String)).toList();
+  }
+
+  Future<void> addInactivePeriod(DateTime start, DateTime end) async {
+    final a = _day(start), b = _day(end);
+    if (a.compareTo(b) > 0) throw StateError('A data inicial deve ser anterior à final.');
+    await (await database).insert('inactive_periods', {'start_day': a, 'end_day': b});
+  }
+
+  Future<void> deleteInactivePeriod(int id) async {
+    await (await database).delete('inactive_periods', where: 'id = ?', whereArgs: [id]);
+  }
+
+  bool _inactiveOn(String day, List<InactivePeriod> periods) =>
+    periods.any((p) => p.startDay.compareTo(day) <= 0 && p.endDay.compareTo(day) >= 0);
+
+  Future<bool> isInactiveToday() async {
+    return _inactiveOn(_day(DateTime.now()), await getInactivePeriods());
+  }
+
+  Future<StreakStatus> getStreakStatus() async {
+    final db = await database;
+    final rows = await db.query('transactions', columns: ['created_at']);
+    final completedDays = <String>{};
+    for (final row in rows) {
+      final date = DateTime.tryParse(row['created_at'] as String);
+      if (date != null) completedDays.add(_day(date.toLocal()));
+    }
+    final rest = await getRestDays();
+    final periods = await getInactivePeriods();
+    final today = DateTime.now();
+    final inactive = _inactiveOn(_day(today), periods);
+    final resting = rest.contains(today.weekday);
+    var streak = 0;
+    var started = false;
+    // Um dia de descanso ou inatividade preserva a sequência, mas não a aumenta.
+    // Hoje ainda não concluído também não quebra a sequência até o dia terminar.
+    for (var offset = 0; offset <= 36500; offset++) {
+      final date = DateTime(today.year, today.month, today.day).subtract(Duration(days: offset));
+      final key = _day(date);
+      if (completedDays.contains(key)) {
+        streak++;
+        started = true;
+      } else if (_inactiveOn(key, periods) || rest.contains(date.weekday) || (offset == 0)) {
+        continue;
+      } else {
+        break;
+      }
+      if (started && streak >= completedDays.length) break;
+    }
+    return StreakStatus(streak, inactive, resting);
   }
 
   Future<List<Reward>> getRewards() async {
@@ -246,6 +346,9 @@ class DatabaseService {
       if (rows.isEmpty) return false;
       var row = rows.first;
       final now = DateTime.now();
+      final inactiveRows = await txn.query('inactive_periods',
+        where: 'start_day <= ? AND end_day >= ?', whereArgs: [_day(now), _day(now)]);
+      if (inactiveRows.isNotEmpty) throw StateError('Missões pausadas durante o tempo inativo.');
       if (_isDue(row, now)) {
         await txn.update('missions', {'progress': 0, 'completed': 0, 'period_anchor': null},
           where: 'id = ?', whereArgs: [mission.id]);
