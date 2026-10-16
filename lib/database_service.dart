@@ -23,6 +23,13 @@ class CompletionRecord {
   const CompletionRecord(this.title, this.points, this.when);
 }
 
+class PurchaseRecord {
+  final String title;
+  final int price;
+  final DateTime when;
+  const PurchaseRecord(this.title, this.price, this.when);
+}
+
 class DatabaseService {
   DatabaseService._();
   static final DatabaseService instance = DatabaseService._();
@@ -327,6 +334,17 @@ class DatabaseService {
     final db = await database;
     final rows = await db.query('wallet', where: 'id = 1');
     return {'coins': rows.first['coins'] as int, 'xp': rows.first['xp'] as int};
+  }
+
+  Future<List<PurchaseRecord>> getPurchaseHistory() async {
+    final rows = await (await database).query('owned_rewards',
+      columns: ['title_snapshot', 'price_paid', 'purchased_at'],
+      orderBy: 'purchased_at DESC, id DESC');
+    return rows.map((row) => PurchaseRecord(
+      row['title_snapshot'] as String,
+      row['price_paid'] as int,
+      DateTime.parse(row['purchased_at'] as String),
+    )).toList();
   }
 
   Future<List<CompletionRecord>> getHistory() async {

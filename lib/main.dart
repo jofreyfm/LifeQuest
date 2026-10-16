@@ -40,6 +40,9 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   int coins = 0, xp = 0, tab = 0;
   bool loading = true;
   List<CompletionRecord> history = [];
+  List<PurchaseRecord> purchasesHistory = [];
+  DateTime calendarMonth = DateTime(DateTime.now().year, DateTime.now().month);
+  int statsRange = 30;
   List<Reward> rewards = [];
   List<OwnedReward> ownedRewards = [];
   int shopTab = 0;
@@ -59,6 +62,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       final items = await db.getMissions();
       final wallet = await db.getWallet();
       final records = await db.getHistory();
+      final purchasesRecords = await db.getPurchaseHistory();
       final rewardItems = await db.getRewards();
       final purchases = await db.getOwnedRewards();
       final redemptions = await db.getTotalRedemptions();
@@ -71,6 +75,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         coins = wallet['coins']!;
         xp = wallet['xp']!;
         history = records;
+        purchasesHistory = purchasesRecords;
         rewards = rewardItems;
         ownedRewards = purchases;
         totalRedemptions = redemptions;
@@ -639,6 +644,175 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     ]);
   }
 
+  String dateKey(DateTime d) => '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  Widget calendarPage() {
+    const monthNames = ['janeiro','fevereiro','março','abril','maio','junho',
+      'julho','agosto','setembro','outubro','novembro','dezembro'];
+    final counts = <String,int>{};
+    final points = <String,int>{};
+    for (final record in history) {
+      final key = dateKey(record.when.toLocal());
+      counts[key] = (counts[key] ?? 0) + 1;
+      points[key] = (points[key] ?? 0) + record.points;
+    }
+    final first = DateTime(calendarMonth.year, calendarMonth.month, 1);
+    final daysInMonth = DateTime(first.year, first.month + 1, 0).day;
+    final offset = first.weekday - 1;
+    final today = DateTime.now();
+    final activeDays = counts.entries.where((e) => e.key.startsWith(
+      '${first.year}-${first.month.toString().padLeft(2, '0')}-')).length;
+    final totalMonth = points.entries.where((e) => e.key.startsWith(
+      '${first.year}-${first.month.toString().padLeft(2, '0')}-'))
+      .fold<int>(0, (sum, e) => sum + e.value);
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      const Text('Calendário de atividades', style: TextStyle(fontSize: 23, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 8),
+      const Text('Os dias destacados representam missões concluídas.'),
+      const SizedBox(height: 16),
+      Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(children: [
+        Row(children: [
+          IconButton(tooltip: 'Mês anterior', icon: const Icon(Icons.chevron_left),
+            onPressed: () => setState(() => calendarMonth = DateTime(first.year, first.month - 1))),
+          Expanded(child: Text('${monthNames[first.month - 1]} de ${first.year}',
+            textAlign: TextAlign.center, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+          IconButton(tooltip: 'Próximo mês', icon: const Icon(Icons.chevron_right),
+            onPressed: () => setState(() => calendarMonth = DateTime(first.year, first.month + 1))),
+        ]),
+        Row(children: [for (final name in ['S','T','Q','Q','S','S','D'])
+          Expanded(child: Center(child: Text(name, style: TextStyle(color: Colors.white70))))]),
+        const SizedBox(height: 8),
+        GridView.builder(shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 7,
+            mainAxisSpacing: 5, crossAxisSpacing: 5, childAspectRatio: 1),
+          itemCount: offset + daysInMonth,
+          itemBuilder: (context, index) {
+            if (index < offset) return const SizedBox.shrink();
+            final day = index - offset + 1;
+            final date = DateTime(first.year, first.month, day);
+            final key = dateKey(date);
+            final completed = counts[key] ?? 0;
+            final isToday = dateKey(today) == key;
+            return InkWell(borderRadius: BorderRadius.circular(10),
+              onTap: () => showDayDetails(date, counts[key] ?? 0, points[key] ?? 0),
+              child: Container(decoration: BoxDecoration(
+                color: completed > 0 ? LifeQuestApp.purple.withValues(alpha: .35) : null,
+                borderRadius: BorderRadius.circular(10),
+                border: isToday ? Border.all(color: LifeQuestApp.purple, width: 2) : null),
+                child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  Text('$day', style: TextStyle(fontWeight: completed > 0 ? FontWeight.bold : FontWeight.normal)),
+                  if (completed > 0) const Icon(Icons.circle, size: 6, color: LifeQuestApp.purple),
+                ])));
+          }),
+      ]))),
+      const SizedBox(height: 12),
+      Row(children: [
+        Expanded(child: Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [
+          const Text('Dias ativos'), Text('$activeDays', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))])))),
+        Expanded(child: Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [
+          const Text('XP do mês'), Text('$totalMonth', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))])))),
+      ]),
+      const Padding(padding: EdgeInsets.all(8), child: Text('Toque em uma data para ver as missões daquele dia.')),
+    ]);
+  }
+
+  void showDayDetails(DateTime date, int completed, int earned) {
+    final records = history.where((r) => dateKey(r.when.toLocal()) == dateKey(date)).toList();
+    showModalBottomSheet<void>(context: context, isScrollControlled: true,
+      builder: (context) => SafeArea(child: Padding(padding: const EdgeInsets.all(20), child: Column(
+        mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}',
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Text('$completed conclusões • +$earned XP'),
+          const SizedBox(height: 10),
+          if (records.isEmpty) const Text('Nenhuma missão concluída neste dia.'),
+          ...records.take(20).map((r) => ListTile(
+            contentPadding: EdgeInsets.zero, leading: const Icon(Icons.check_circle_outline),
+            title: Text(r.title), subtitle: Text(formatDate(r.when)), trailing: Text('+${r.points} XP'))),
+          if (records.length > 20) Text('Mais ${records.length - 20} conclusões no histórico.'),
+        ]))));
+  }
+
+  Widget metricCard(String label, String value, IconData icon) => Card(child: Padding(
+    padding: const EdgeInsets.all(14), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Icon(icon, color: LifeQuestApp.purple), const SizedBox(height: 10),
+      Text(value, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+      Text(label, style: const TextStyle(color: Colors.white70)),
+    ])));
+
+  Widget statisticsPage() {
+    final today = DateTime.now();
+    final start = DateTime(today.year, today.month, today.day).subtract(Duration(days: statsRange - 1));
+    final completions = history.where((r) => !r.when.toLocal().isBefore(start)).toList();
+    final purchases = purchasesHistory.where((r) => !r.when.toLocal().isBefore(start)).toList();
+    final earned = completions.fold<int>(0, (sum, r) => sum + r.points);
+    final spent = purchases.fold<int>(0, (sum, r) => sum + r.price);
+    final active = completions.map((r) => dateKey(r.when.toLocal())).toSet().length;
+    final daily = <int>[];
+    for (var i = 6; i >= 0; i--) {
+      final date = DateTime(today.year, today.month, today.day).subtract(Duration(days: i));
+      daily.add(history.where((r) => dateKey(r.when.toLocal()) == dateKey(date))
+        .fold<int>(0, (sum, r) => sum + r.points));
+    }
+    final maxValue = daily.fold<int>(1, (max, v) => v > max ? v : max);
+    final categoryCounts = <String,int>{};
+    for (final record in completions) {
+      categoryCounts[record.title] = (categoryCounts[record.title] ?? 0) + 1;
+    }
+    final mostDone = categoryCounts.entries.toList()..sort((a,b) => b.value.compareTo(a.value));
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      const Text('Estatísticas', style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 10),
+      SegmentedButton<int>(segments: const [
+        ButtonSegment(value: 7, label: Text('7 dias')),
+        ButtonSegment(value: 30, label: Text('30 dias')),
+        ButtonSegment(value: 90, label: Text('90 dias')),
+      ], selected: {statsRange}, onSelectionChanged: (value) => setState(() => statsRange = value.first)),
+      const SizedBox(height: 14),
+      Row(children: [
+        Expanded(child: metricCard('Missões concluídas', '${completions.length}', Icons.task_alt)),
+        Expanded(child: metricCard('Dias ativos', '$active', Icons.calendar_today_outlined)),
+      ]),
+      Row(children: [
+        Expanded(child: metricCard('XP conquistado', '$earned', Icons.bolt_outlined)),
+        Expanded(child: metricCard('Moedas gastas', '$spent', Icons.shopping_bag_outlined)),
+      ]),
+      Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('XP ganho nos últimos 7 dias', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          SizedBox(height: 150, child: Row(crossAxisAlignment: CrossAxisAlignment.end,
+            children: [for (var i = 0; i < 7; i++) Expanded(child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [
+                Text('${daily[i]}', style: const TextStyle(fontSize: 10)),
+                const SizedBox(height: 4),
+                Container(height: 105 * daily[i] / maxValue + (daily[i] > 0 ? 3 : 0),
+                  decoration: BoxDecoration(color: LifeQuestApp.purple,
+                    borderRadius: BorderRadius.circular(5))),
+                const SizedBox(height: 6),
+                Text('${DateTime(today.year, today.month, today.day).subtract(Duration(days: 6-i)).day}',
+                  style: const TextStyle(fontSize: 11)),
+              ])))])),
+          const SizedBox(height: 8),
+          const Text('Números abaixo das barras = dia do mês', style: TextStyle(fontSize: 11, color: Colors.white70)),
+        ]))),
+      Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Missões mais concluídas no período', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          if (mostDone.isEmpty) const Padding(padding: EdgeInsets.only(top: 12),
+            child: Text('Ainda não há conclusões neste período.')),
+          ...mostDone.take(5).map((e) => ListTile(
+            contentPadding: EdgeInsets.zero, title: Text(e.key), trailing: Text('${e.value}x'))),
+        ]))),
+      const Padding(padding: EdgeInsets.all(8), child: Text(
+        'Os totais do período são calculados a partir do histórico salvo. '
+        'As moedas gastas incluem recompensas já utilizadas ou ocultadas.',
+        style: TextStyle(color: Colors.white70, fontSize: 12))),
+    ]);
+  }
+
   Widget placeholder(String name, IconData icon) => Center(child: Column(
     mainAxisSize: MainAxisSize.min, children: [
       Icon(icon, size: 55, color: LifeQuestApp.purple),
@@ -665,8 +839,8 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     body: loading ? const Center(child: CircularProgressIndicator()) : [
       overview(), missionList(),
       shopPage(),
-      placeholder('Calendário', Icons.calendar_month_outlined),
-      placeholder('Estatísticas', Icons.bar_chart_outlined),
+      calendarPage(),
+      statisticsPage(),
       historyPage(), profilePage(), streakSettings(),
     ][tab],
     floatingActionButton: tab <= 2 ? FloatingActionButton.extended(
