@@ -288,6 +288,12 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     final level = levelForXp(xp);
     final achievements = achievementsFor(xp: xp, completions: history.length,
       purchases: totalRedemptions);
+    // Exibe as conquistas desbloqueadas primeiro, mantendo a ordem original
+    // dentro dos grupos de desbloqueadas e pendentes.
+    final orderedAchievements = [
+      ...achievements.where((a) => a.unlocked),
+      ...achievements.where((a) => !a.unlocked),
+    ];
     final unlocked = achievements.where((a) => a.unlocked).length;
     return ListView(padding: const EdgeInsets.all(16), children: [
       const Text('Meu perfil', style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
@@ -321,7 +327,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       Text('Conquistas ($unlocked/${achievements.length})',
         style: const TextStyle(fontSize: 21, fontWeight: FontWeight.bold)),
       const SizedBox(height: 10),
-      ...achievements.map((a) => Card(child: Padding(
+      ...orderedAchievements.map((a) => Card(child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 7), child: Column(children: [
           ListTile(
             leading: Icon(a.unlocked ? Icons.emoji_events : a.icon,
