@@ -40,7 +40,7 @@ class DatabaseService {
     final location = join(await getDatabasesPath(), 'lifequest.db');
     _database = await openDatabase(
       location,
-      version: 7,
+      version: 8,
       onCreate: (db, version) async {
         await db.execute('''CREATE TABLE missions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +59,7 @@ class DatabaseService {
         await _createStreakTables(db);
         await _createFocusTables(db);
         await _createDraftTimerTable(db);
+        await _createReminderTable(db);
         await db.execute('''CREATE TABLE transactions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           mission_id INTEGER, points INTEGER NOT NULL,
@@ -89,9 +90,60 @@ class DatabaseService {
         if (oldVersion < 7) {
           await _createDraftTimerTable(db);
         }
+        if (oldVersion < 8) {
+          await _createReminderTable(db);
+        }
       },
     );
     return _database!;
+  }
+
+  static Future<void> _createReminderTable(DatabaseExecutor db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS mission_reminders (
+      mission_id INTEGER PRIMARY KEY, hour INTEGER NOT NULL,
+      minute INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+      last_notified TEXT,
+      FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE CASCADE
+    )''');
+  }
+
+  Future<Map<int, Map<String, Object?>>> getReminders() async {
+    final rows = await (await database).query('mission_reminders');
+    return {for (final row in rows) row['mission_id'] as int: row};
+  }
+
+  Future<void> saveReminder(int missionId, int hour, int minute) async {
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      throw StateError('Horário inválido.');
+    }
+    await (await database).insert('mission_reminders', {
+      'mission_id': missionId, 'hour': hour, 'minute': minute,
+      'enabled': 1, 'last_notified': null,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> removeReminder(int missionId) async {
+    await (await database).delete('mission_reminders',
+      where: 'mission_id = ?', whereArgs: [missionId]);
+  }
+
+  Future<List<int>> consumeDueReminders(DateTime now) async {
+    final today = '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    final db = await database;
+    return db.transaction((txn) async {
+      final due = await txn.rawQuery('''SELECT r.mission_id FROM mission_reminders r
+        JOIN missions m ON m.id = r.mission_id
+        WHERE r.enabled = 1 AND (r.hour * 60 + r.minute) <= ?
+        AND (r.last_notified IS NULL OR r.last_notified <> ?)
+        AND NOT (m.frequency = 'Única' AND m.completed = 1)''',
+        [now.hour * 60 + now.minute, today]);
+      final ids = due.map((r) => r['mission_id'] as int).toList();
+      for (final id in ids) {
+        await txn.update('mission_reminders', {'last_notified': today},
+          where: 'mission_id = ?', whereArgs: [id]);
+      }
+      return ids;
+    });
   }
 
   static Future<void> _createRewardTables(DatabaseExecutor db) async {

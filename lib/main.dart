@@ -54,12 +54,43 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   List<InactivePeriod> inactivePeriods = [];
   Map<String, int> weeklyGoal = {'target': 5, 'bonus': 30, 'completed': 0, 'claimed': 0};
   int focusSecondsRange = 0;
+  Map<int, Map<String, Object?>> reminders = {};
+  final List<String> reminderInbox = [];
+  Timer? reminderTimer;
+
 
   @override
   void initState() {
     super.initState();
-    refresh();
+    refresh().then((_) => checkReminders());
+    reminderTimer = Timer.periodic(const Duration(minutes: 1), (_) => checkReminders());
   }
+
+  @override
+  void dispose() {
+    reminderTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> checkReminders() async {
+    if (!mounted || loading) return;
+    try {
+      if (streak.inactiveToday) return;
+      final due = await db.consumeDueReminders(DateTime.now());
+      if (!mounted || due.isEmpty) return;
+      final names = {for (final mission in missions) mission.id: mission.title};
+      setState(() {
+        for (final id in due) {
+          reminderInbox.insert(0, 'Hora de: ${names[id] ?? 'Missão'}');
+        }
+      });
+      message(due.length == 1 ? 'Você tem um lembrete de missão!' :
+        'Você tem ${due.length} lembretes de missões!');
+    } catch (error) {
+      // Falhas de leitura não impedem o uso do aplicativo.
+    }
+  }
+
 
   Future<void> refresh() async {
     try {
@@ -74,6 +105,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       final rests = await db.getRestDays();
       final periods = await db.getInactivePeriods();
       final weekly = await db.getWeeklyGoal();
+      final savedReminders = await db.getReminders();
       final today = DateTime.now();
       final focusStart = DateTime(today.year, today.month, today.day).subtract(Duration(days: statsRange - 1));
       final focused = await db.getFocusSecondsSince(focusStart);
@@ -91,6 +123,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         restDays = rests;
         inactivePeriods = periods;
         weeklyGoal = weekly;
+        reminders = savedReminders;
         focusSecondsRange = focused;
         loading = false;
       });
@@ -119,6 +152,72 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       message('Erro ao salvar missão: $error');
     }
   }
+
+  Future<void> configureReminder(Mission mission) async {
+    if (mission.id == null) return;
+    final saved = reminders[mission.id];
+    TimeOfDay selected = TimeOfDay(
+      hour: (saved?['hour'] as int?) ?? 9,
+      minute: (saved?['minute'] as int?) ?? 0);
+    final action = await showDialog<String>(context: context, builder: (dialogContext) =>
+      StatefulBuilder(builder: (dialogContext, update) => AlertDialog(
+        title: Text('Lembrete: ${mission.title}'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Aviso diário enquanto o aplicativo estiver aberto.'),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(icon: const Icon(Icons.schedule),
+            label: Text(selected.format(dialogContext)),
+            onPressed: () async {
+              final time = await showTimePicker(context: dialogContext,
+                initialTime: selected);
+              if (time != null) update(() => selected = time);
+            }),
+        ]),
+        actions: [
+          if (saved != null) TextButton(onPressed: () => Navigator.pop(dialogContext, 'remove'),
+            child: const Text('Desativar')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, 'save'),
+            child: const Text('Salvar')),
+        ],
+      )));
+    try {
+      if (action == 'save') {
+        await db.saveReminder(mission.id!, selected.hour, selected.minute);
+      } else if (action == 'remove') {
+        await db.removeReminder(mission.id!);
+      } else { return; }
+      await refresh();
+      if (action == 'save') await checkReminders();
+    } catch (error) { message('Erro ao configurar lembrete: $error'); }
+  }
+
+  Widget remindersPage() => ListView(padding: const EdgeInsets.all(16), children: [
+    const Text('Lembretes de missões', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+    const SizedBox(height: 8),
+    const Text('Os avisos aparecem dentro do LifeQuest enquanto ele estiver aberto. '
+      'Não são notificações do sistema Android.'),
+    const SizedBox(height: 16),
+    if (reminderInbox.isNotEmpty) Card(child: Column(children: [
+      const ListTile(title: Text('Avisos recebidos'), leading: Icon(Icons.notifications_active_outlined)),
+      ...reminderInbox.take(20).map((item) => ListTile(title: Text(item))),
+      TextButton(onPressed: () => setState(reminderInbox.clear),
+        child: const Text('Limpar avisos desta sessão')),
+    ])),
+    ...missions.where((m) => m.id != null).map((mission) {
+      final saved = reminders[mission.id];
+      final hour = saved?['hour'] as int?;
+      final minute = saved?['minute'] as int?;
+      final time = hour == null || minute == null ? 'Sem lembrete' :
+        '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+      return Card(child: ListTile(
+        leading: Icon(saved == null ? Icons.notifications_none : Icons.notifications_active_outlined),
+        title: Text(mission.title), subtitle: Text(time),
+        trailing: const Icon(Icons.edit_outlined),
+        onTap: () => configureReminder(mission),
+      ));
+    }),
+  ]);
 
   Future<void> changeProgress(Mission mission) async {
     if (streak.inactiveToday) {
@@ -917,9 +1016,11 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
-      title: Text(tab == 5 ? 'Histórico' : tab == 6 ? 'Perfil' : tab == 7 ? 'Sequência' : 'LifeQuest'),
+      title: Text(tab == 5 ? 'Histórico' : tab == 6 ? 'Perfil' : tab == 7 ? 'Sequência' : tab == 8 ? 'Lembretes' : 'LifeQuest'),
       backgroundColor: LifeQuestApp.bg,
       actions: [
+        IconButton(tooltip: 'Lembretes', icon: const Icon(Icons.notifications_outlined),
+          onPressed: () => setState(() => tab = 8)),
         IconButton(tooltip: 'Sequência e pausas', icon: const Icon(Icons.local_fire_department_outlined),
           onPressed: () => setState(() => tab = 7)),
         IconButton(tooltip: 'Perfil e conquistas', icon: const Icon(Icons.person_outline),
@@ -933,7 +1034,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       shopPage(),
       calendarPage(),
       statisticsPage(),
-      historyPage(), profilePage(), streakSettings(),
+      historyPage(), profilePage(), streakSettings(), remindersPage(),
     ][tab],
     floatingActionButton: tab <= 2 ? FloatingActionButton.extended(
       onPressed: tab == 2 ? () => editReward() : () => editMission(),
