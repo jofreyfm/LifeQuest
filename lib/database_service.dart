@@ -40,7 +40,7 @@ class DatabaseService {
     final location = join(await getDatabasesPath(), 'lifequest.db');
     _database = await openDatabase(
       location,
-      version: 5,
+      version: 6,
       onCreate: (db, version) async {
         await db.execute('''CREATE TABLE missions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +57,7 @@ class DatabaseService {
         await db.insert('wallet', {'id': 1, 'coins': 0, 'xp': 0});
         await _createRewardTables(db);
         await _createStreakTables(db);
+        await _createFocusTables(db);
         await db.execute('''CREATE TABLE transactions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           mission_id INTEGER, points INTEGER NOT NULL,
@@ -80,6 +81,9 @@ class DatabaseService {
         }
         if (oldVersion < 5) {
           await _createStreakTables(db);
+        }
+        if (oldVersion < 6) {
+          await _createFocusTables(db);
         }
       },
     );
@@ -111,6 +115,95 @@ class DatabaseService {
       start_day TEXT NOT NULL, end_day TEXT NOT NULL,
       CHECK(start_day <= end_day)
     )''');
+  }
+
+  static Future<void> _createFocusTables(DatabaseExecutor db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS focus_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mission_id INTEGER NOT NULL,
+      title_snapshot TEXT NOT NULL,
+      seconds INTEGER NOT NULL CHECK(seconds > 0),
+      created_at TEXT NOT NULL
+    )''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS weekly_goals (
+      id INTEGER PRIMARY KEY CHECK(id = 1),
+      target INTEGER NOT NULL DEFAULT 5 CHECK(target > 0),
+      bonus INTEGER NOT NULL DEFAULT 30 CHECK(bonus > 0)
+    )''');
+    await db.insert('weekly_goals', {'id': 1, 'target': 5, 'bonus': 30},
+      conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.execute('''CREATE TABLE IF NOT EXISTS weekly_claims (
+      week_key TEXT PRIMARY KEY, coins INTEGER NOT NULL, claimed_at TEXT NOT NULL
+    )''');
+  }
+
+  Future<int> getMissionFocusSeconds(int missionId) async {
+    final rows = await (await database).rawQuery(
+      'SELECT COALESCE(SUM(seconds),0) AS total FROM focus_sessions WHERE mission_id = ?', [missionId]);
+    return (rows.first['total'] as int?) ?? 0;
+  }
+
+  Future<int> getFocusSecondsSince(DateTime start) async {
+    final rows = await (await database).rawQuery(
+      'SELECT COALESCE(SUM(seconds),0) AS total FROM focus_sessions WHERE created_at >= ?',
+      [start.toIso8601String()]);
+    return (rows.first['total'] as int?) ?? 0;
+  }
+
+  Future<void> saveFocusSession(int missionId, String title, int seconds) async {
+    if (seconds <= 0) return;
+    final db = await database;
+    if ((await db.query('missions', where: 'id = ?', whereArgs: [missionId])).isEmpty) {
+      throw StateError('Missão não encontrada.');
+    }
+    await db.insert('focus_sessions', {
+      'mission_id': missionId, 'title_snapshot': title,
+      'seconds': seconds, 'created_at': DateTime.now().toIso8601String(),
+    });
+  }
+
+  String _weekKey(DateTime d) {
+    final monday = DateTime(d.year, d.month, d.day).subtract(Duration(days: d.weekday - 1));
+    return _day(monday);
+  }
+
+  Future<Map<String, int>> getWeeklyGoal() async {
+    final db = await database;
+    final rows = await db.query('weekly_goals', where: 'id = 1');
+    final week = _weekKey(DateTime.now());
+    final count = Sqflite.firstIntValue(await db.rawQuery(
+      'SELECT COUNT(*) FROM transactions WHERE created_at >= ? AND created_at < ?',
+      ['${week}T00:00:00', DateTime.parse(week).add(const Duration(days: 7)).toIso8601String()])) ?? 0;
+    final claimed = (await db.query('weekly_claims', where: 'week_key = ?', whereArgs: [week])).isNotEmpty;
+    return {'target': rows.first['target'] as int, 'bonus': rows.first['bonus'] as int,
+      'completed': count, 'claimed': claimed ? 1 : 0};
+  }
+
+  Future<void> setWeeklyGoal(int target, int bonus) async {
+    if (target < 1 || target > 100 || bonus < 1 || bonus > 10000) {
+      throw StateError('Defina uma meta de 1 a 100 missões e um bônus de 1 a 10.000 moedas.');
+    }
+    await (await database).update('weekly_goals', {'target': target, 'bonus': bonus},
+      where: 'id = 1');
+  }
+
+  Future<int> claimWeeklyBonus() async {
+    final db = await database;
+    return db.transaction((txn) async {
+      final week = _weekKey(DateTime.now());
+      final previous = await txn.query('weekly_claims', where: 'week_key = ?', whereArgs: [week]);
+      if (previous.isNotEmpty) throw StateError('Bônus desta semana já resgatado.');
+      final goal = (await txn.query('weekly_goals', where: 'id = 1')).first;
+      final count = Sqflite.firstIntValue(await txn.rawQuery(
+        'SELECT COUNT(*) FROM transactions WHERE created_at >= ? AND created_at < ?',
+        ['${week}T00:00:00', DateTime.parse(week).add(const Duration(days: 7)).toIso8601String()])) ?? 0;
+      if (count < (goal['target'] as int)) throw StateError('Meta semanal ainda não atingida.');
+      final bonus = goal['bonus'] as int;
+      await txn.insert('weekly_claims', {
+        'week_key': week, 'coins': bonus, 'claimed_at': DateTime.now().toIso8601String()});
+      await txn.rawUpdate('UPDATE wallet SET coins = coins + ? WHERE id = 1', [bonus]);
+      return bonus;
+    });
   }
 
   Future<Set<int>> getRestDays() async {

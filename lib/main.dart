@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 import 'database_service.dart';
 import 'mission.dart';
@@ -50,6 +52,8 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   StreakStatus streak = const StreakStatus(0, false, false);
   Set<int> restDays = {};
   List<InactivePeriod> inactivePeriods = [];
+  Map<String, int> weeklyGoal = {'target': 5, 'bonus': 30, 'completed': 0, 'claimed': 0};
+  int focusSecondsRange = 0;
 
   @override
   void initState() {
@@ -69,6 +73,10 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       final streakInfo = await db.getStreakStatus();
       final rests = await db.getRestDays();
       final periods = await db.getInactivePeriods();
+      final weekly = await db.getWeeklyGoal();
+      final today = DateTime.now();
+      final focusStart = DateTime(today.year, today.month, today.day).subtract(Duration(days: statsRange - 1));
+      final focused = await db.getFocusSecondsSince(focusStart);
       if (!mounted) return;
       setState(() {
         missions = items;
@@ -82,6 +90,8 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         streak = streakInfo;
         restDays = rests;
         inactivePeriods = periods;
+        weeklyGoal = weekly;
+        focusSecondsRange = focused;
         loading = false;
       });
     } catch (error) {
@@ -447,6 +457,73 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     ))),
   ]);
 
+  Future<void> openTimer(Mission mission) async {
+    if (streak.inactiveToday) {
+      message('Cronômetro indisponível durante o período inativo.');
+      return;
+    }
+    await showDialog<void>(context: context, barrierDismissible: false,
+      builder: (_) => FocusTimerDialog(mission: mission, db: db));
+    await refresh();
+  }
+
+  Future<void> editWeeklyGoal() async {
+    final target = TextEditingController(text: '${weeklyGoal['target']}');
+    final bonus = TextEditingController(text: '${weeklyGoal['bonus']}');
+    final result = await showDialog<List<int>>(context: context, builder: (_) => AlertDialog(
+      title: const Text('Meta semanal'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(controller: target, keyboardType: TextInputType.number,
+          decoration: const InputDecoration(labelText: 'Missões concluídas na semana')),
+        TextField(controller: bonus, keyboardType: TextInputType.number,
+          decoration: const InputDecoration(labelText: 'Bônus em moedas')),
+      ]),
+      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+        FilledButton(onPressed: () {
+          final a = int.tryParse(target.text);
+          final b = int.tryParse(bonus.text);
+          if (a != null && b != null) Navigator.pop(context, [a,b]);
+        }, child: const Text('Salvar'))],
+    ));
+    // Controladores locais não são descartados durante a animação de saída.
+    if (result == null) return;
+    try { await db.setWeeklyGoal(result[0], result[1]); await refresh(); }
+    catch (e) { message('$e'); }
+  }
+
+  Future<void> claimBonus() async {
+    try {
+      final amount = await db.claimWeeklyBonus();
+      await refresh();
+      message('Bônus semanal resgatado: +$amount moedas!');
+    } catch (e) { message('$e'); }
+  }
+
+  Widget weeklyGoalCard() {
+    final target = weeklyGoal['target'] ?? 5;
+    final completed = weeklyGoal['completed'] ?? 0;
+    final bonus = weeklyGoal['bonus'] ?? 30;
+    final claimed = weeklyGoal['claimed'] == 1;
+    return Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [const Icon(Icons.card_giftcard, color: LifeQuestApp.purple),
+          const SizedBox(width: 10), const Expanded(child: Text('Meta semanal',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
+          IconButton(tooltip: 'Editar meta', icon: const Icon(Icons.settings_outlined),
+            onPressed: claimed ? null : editWeeklyGoal)]),
+        Text('$completed de $target missões • Bônus: $bonus moedas'),
+        const SizedBox(height: 10),
+        LinearProgressIndicator(value: (completed / target).clamp(0.0, 1.0), minHeight: 7),
+        const SizedBox(height: 10),
+        if (claimed) const Text('Bônus desta semana já resgatado ✓')
+        else if (completed >= target) FilledButton.icon(
+          onPressed: claimBonus, icon: const Icon(Icons.redeem),
+          label: const Text('Resgatar bônus'))
+        else const Text('Conclua missões nesta semana para liberar o bônus.',
+          style: TextStyle(color: Colors.white70)),
+      ])));
+  }
+
   Widget missionCard(Mission mission) => Card(
     child: Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -506,6 +583,11 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
             Text('${mission.progress}%'),
             const SizedBox(width: 8),
             IconButton(
+              tooltip: 'Cronômetro da missão',
+              onPressed: streak.inactiveToday ? null : () => openTimer(mission),
+              icon: const Icon(Icons.timer_outlined),
+            ),
+            IconButton(
               tooltip: 'Atualizar progresso',
               onPressed: mission.completed || streak.inactiveToday ? null : () => changeProgress(mission),
               icon: const Icon(Icons.edit_note),
@@ -551,6 +633,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         trailing: const Icon(Icons.settings_outlined),
         onTap: () => setState(() => tab = 7),
       )),
+      weeklyGoalCard(),
       const SizedBox(height: 20),
       Text('Missões ($finished/${missions.length} concluídas)',
         style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
@@ -564,6 +647,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   Widget missionList() => ListView(padding: const EdgeInsets.all(16), children: [
     const Text('Minhas missões', style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
     const SizedBox(height: 12),
+    weeklyGoalCard(),
     ...missions.map(missionCard),
     if (missions.isEmpty) const Text('Crie uma missão usando o botão +.'),
   ]);
@@ -734,6 +818,13 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         ]))));
   }
 
+  String formatFocusTime(int seconds) {
+    final hours = seconds ~/ 3600;
+    final minutes = (seconds % 3600) ~/ 60;
+    final remaining = seconds % 60;
+    return hours > 0 ? '${hours}h ${minutes}min' : '${minutes}min ${remaining}s';
+  }
+
   Widget metricCard(String label, String value, IconData icon) => Card(child: Padding(
     padding: const EdgeInsets.all(14), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Icon(icon, color: LifeQuestApp.purple), const SizedBox(height: 10),
@@ -768,7 +859,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         ButtonSegment(value: 7, label: Text('7 dias')),
         ButtonSegment(value: 30, label: Text('30 dias')),
         ButtonSegment(value: 90, label: Text('90 dias')),
-      ], selected: {statsRange}, onSelectionChanged: (value) => setState(() => statsRange = value.first)),
+      ], selected: {statsRange}, onSelectionChanged: (value) { setState(() => statsRange = value.first); refresh(); }),
       const SizedBox(height: 14),
       Row(children: [
         Expanded(child: metricCard('Missões concluídas', '${completions.length}', Icons.task_alt)),
@@ -778,6 +869,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         Expanded(child: metricCard('XP conquistado', '$earned', Icons.bolt_outlined)),
         Expanded(child: metricCard('Moedas gastas', '$spent', Icons.shopping_bag_outlined)),
       ]),
+      metricCard('Tempo de foco no período', formatFocusTime(focusSecondsRange), Icons.timer_outlined),
       Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
         crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Text('XP ganho nos últimos 7 dias', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
@@ -1053,4 +1145,82 @@ class _RewardEditorDialogState extends State<RewardEditorDialog> {
       FilledButton(onPressed: save, child: const Text('Salvar')),
     ],
   );
+}
+
+
+class FocusTimerDialog extends StatefulWidget {
+  final Mission mission;
+  final DatabaseService db;
+  const FocusTimerDialog({super.key, required this.mission, required this.db});
+  @override
+  State<FocusTimerDialog> createState() => _FocusTimerDialogState();
+}
+
+class _FocusTimerDialogState extends State<FocusTimerDialog> {
+  final Stopwatch watch = Stopwatch();
+  Timer? ticker;
+  int accumulatedSeconds = 0;
+  bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && watch.isRunning) setState(() {});
+    });
+  }
+
+  int get seconds => accumulatedSeconds + watch.elapsed.inSeconds;
+
+  Future<void> finish() async {
+    if (saving) return;
+    setState(() => saving = true);
+    watch.stop();
+    try {
+      await widget.db.saveFocusSession(widget.mission.id!, widget.mission.title, seconds);
+      if (mounted) Navigator.pop(context);
+    } catch (error) {
+      if (mounted) {
+        setState(() => saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    ticker?.cancel();
+    watch.stop();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final duration = Duration(seconds: seconds);
+    final display = '${duration.inHours.toString().padLeft(2, '0')}:'
+      '${(duration.inMinutes % 60).toString().padLeft(2, '0')}:'
+      '${(duration.inSeconds % 60).toString().padLeft(2, '0')}';
+    return PopScope(canPop: false, child: AlertDialog(
+      title: Text('Foco: ${widget.mission.title}'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Icon(Icons.timer_outlined, size: 42, color: LifeQuestApp.purple),
+        const SizedBox(height: 14),
+        Text(display, style: const TextStyle(fontSize: 38, fontWeight: FontWeight.bold,
+          fontFeatures: [FontFeature.tabularFigures()])),
+        const SizedBox(height: 10),
+        const Text('O tempo é salvo ao tocar em Finalizar.',
+          textAlign: TextAlign.center, style: TextStyle(color: Colors.white70)),
+      ]),
+      actions: [
+        TextButton(onPressed: saving ? null : () {
+          setState(() {
+            if (watch.isRunning) { accumulatedSeconds += watch.elapsed.inSeconds; watch.reset(); watch.stop(); }
+            else { watch.start(); }
+          });
+        }, child: Text(watch.isRunning ? 'Pausar' : 'Iniciar / Retomar')),
+        FilledButton(onPressed: saving ? null : finish,
+          child: Text(saving ? 'Salvando...' : 'Finalizar')),
+      ],
+    ));
+  }
 }
