@@ -1,6 +1,7 @@
 import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 import 'mission.dart';
+import 'reward.dart';
 
 class CompletionRecord {
   final String title;
@@ -19,7 +20,7 @@ class DatabaseService {
     final location = join(await getDatabasesPath(), 'lifequest.db');
     _database = await openDatabase(
       location,
-      version: 2,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''CREATE TABLE missions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,6 +35,7 @@ class DatabaseService {
           coins INTEGER NOT NULL DEFAULT 0, xp INTEGER NOT NULL DEFAULT 0
         )''');
         await db.insert('wallet', {'id': 1, 'coins': 0, 'xp': 0});
+        await _createRewardTables(db);
         await db.execute('''CREATE TABLE transactions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           mission_id INTEGER, points INTEGER NOT NULL,
@@ -49,9 +51,113 @@ class DatabaseService {
           await db.execute('''UPDATE missions SET period_anchor = last_completed_on
             WHERE last_completed_on IS NOT NULL''');
         }
+        if (oldVersion < 3) {
+          await _createRewardTables(db);
+        }
+        if (oldVersion < 4) {
+          await db.execute('ALTER TABLE owned_rewards ADD COLUMN hidden_at TEXT');
+        }
       },
     );
     return _database!;
+  }
+
+  static Future<void> _createRewardTables(DatabaseExecutor db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS rewards (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL, description TEXT NOT NULL,
+      category TEXT NOT NULL, price INTEGER NOT NULL CHECK(price > 0),
+      max_redemptions INTEGER CHECK(max_redemptions > 0)
+    )''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS owned_rewards (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reward_id INTEGER, title_snapshot TEXT NOT NULL,
+      description_snapshot TEXT NOT NULL, price_paid INTEGER NOT NULL,
+      purchased_at TEXT NOT NULL, used_at TEXT, hidden_at TEXT
+    )''');
+  }
+
+  Future<List<Reward>> getRewards() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT r.*, (SELECT COUNT(*) FROM owned_rewards o
+        WHERE o.reward_id = r.id) AS redeemed_count
+      FROM rewards r ORDER BY r.id DESC
+    ''');
+    return rows.map(Reward.fromMap).toList();
+  }
+
+  Future<List<OwnedReward>> getOwnedRewards() async {
+    final db = await database;
+    final rows = await db.query('owned_rewards',
+      where: 'hidden_at IS NULL',
+      orderBy: 'purchased_at DESC, id DESC');
+    return rows.map(OwnedReward.fromMap).toList();
+  }
+
+  Future<void> saveReward(Reward reward) async {
+    final db = await database;
+    if (reward.price <= 0 || (reward.maxRedemptions != null && reward.maxRedemptions! <= 0)) {
+      throw StateError('Preço e limite devem ser positivos.');
+    }
+    if (reward.id == null) {
+      await db.insert('rewards', reward.toMap());
+    } else {
+      final changed = await db.update('rewards', reward.toMap(),
+        where: 'id = ?', whereArgs: [reward.id]);
+      if (changed == 0) throw StateError('Recompensa não encontrada.');
+    }
+  }
+
+  Future<void> deleteReward(int id) async {
+    final db = await database;
+    await db.delete('rewards', where: 'id = ?', whereArgs: [id]);
+    // Compras anteriores são preservadas com nome e preço históricos.
+  }
+
+  Future<void> redeemReward(int rewardId) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final rows = await txn.query('rewards', where: 'id = ?', whereArgs: [rewardId]);
+      if (rows.isEmpty) throw StateError('Recompensa não encontrada.');
+      final reward = Reward.fromMap({...rows.first, 'redeemed_count': 0});
+      final count = Sqflite.firstIntValue(await txn.rawQuery(
+        'SELECT COUNT(*) FROM owned_rewards WHERE reward_id = ?', [rewardId])) ?? 0;
+      if (reward.maxRedemptions != null && count >= reward.maxRedemptions!) {
+        throw StateError('Limite de resgates atingido.');
+      }
+      final wallet = await txn.query('wallet', where: 'id = 1');
+      if (wallet.isEmpty || (wallet.first['coins'] as int) < reward.price) {
+        throw StateError('Moedas insuficientes.');
+      }
+      await txn.rawUpdate('UPDATE wallet SET coins = coins - ? WHERE id = 1', [reward.price]);
+      await txn.insert('owned_rewards', {
+        'reward_id': rewardId, 'title_snapshot': reward.title,
+        'description_snapshot': reward.description,
+        'price_paid': reward.price, 'purchased_at': DateTime.now().toIso8601String(),
+      });
+    });
+  }
+
+  Future<void> useOwnedReward(int id) async {
+    final db = await database;
+    final changed = await db.update('owned_rewards',
+      {'used_at': DateTime.now().toIso8601String()},
+      where: 'id = ? AND used_at IS NULL', whereArgs: [id]);
+    if (changed == 0) throw StateError('Recompensa já utilizada ou não encontrada.');
+  }
+
+  // Oculta apenas uma unidade já utilizada. O registro continua no banco
+  // para preservar o histórico e a contagem de limites de resgate.
+  Future<void> hideUsedReward(int id) async {
+    final db = await database;
+    final changed = await db.update('owned_rewards',
+      {'hidden_at': DateTime.now().toIso8601String()},
+      where: 'id = ? AND used_at IS NOT NULL AND hidden_at IS NULL',
+      whereArgs: [id]);
+    if (changed == 0) {
+      throw StateError('A recompensa não está utilizada ou já foi removida.');
+    }
   }
 
   String _day(DateTime d) => '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';

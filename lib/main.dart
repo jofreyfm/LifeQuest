@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'database_service.dart';
 import 'mission.dart';
+import 'reward.dart';
 
 void main() => runApp(const LifeQuestApp());
 
@@ -38,6 +39,9 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   int coins = 0, xp = 0, tab = 0;
   bool loading = true;
   List<CompletionRecord> history = [];
+  List<Reward> rewards = [];
+  List<OwnedReward> ownedRewards = [];
+  int shopTab = 0;
 
   @override
   void initState() {
@@ -50,12 +54,16 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       final items = await db.getMissions();
       final wallet = await db.getWallet();
       final records = await db.getHistory();
+      final rewardItems = await db.getRewards();
+      final purchases = await db.getOwnedRewards();
       if (!mounted) return;
       setState(() {
         missions = items;
         coins = wallet['coins']!;
         xp = wallet['xp']!;
         history = records;
+        rewards = rewardItems;
+        ownedRewards = purchases;
         loading = false;
       });
     } catch (error) {
@@ -133,6 +141,176 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       }
     }
   }
+
+  Future<void> editReward([Reward? reward]) async {
+    final result = await showDialog<Reward>(
+      context: context, builder: (_) => RewardEditorDialog(reward: reward));
+    if (result == null || !mounted) return;
+    try {
+      await db.saveReward(result);
+      await refresh();
+      message(reward == null ? 'Recompensa criada!' : 'Recompensa atualizada!');
+    } catch (error) {
+      message('Erro ao salvar recompensa: $error');
+    }
+  }
+
+  Future<void> removeReward(Reward reward) async {
+    final confirm = await showDialog<bool>(context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Excluir recompensa?'),
+        content: Text('Excluir "${reward.title}" da loja? As unidades já adquiridas serão mantidas.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Excluir')),
+        ],
+      ));
+    if (confirm != true) return;
+    try {
+      await db.deleteReward(reward.id!);
+      await refresh();
+    } catch (error) {
+      message('Erro ao excluir recompensa: $error');
+    }
+  }
+
+  Future<void> buyReward(Reward reward) async {
+    if (coins < reward.price || !reward.available) return;
+    final confirm = await showDialog<bool>(context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Confirmar resgate'),
+        content: Text('Trocar ${reward.price} moedas por "${reward.title}"? Ela ficará na lista Adquiridas para usar depois.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Resgatar')),
+        ],
+      ));
+    if (confirm != true) return;
+    try {
+      await db.redeemReward(reward.id!);
+      await refresh();
+      if (!mounted) return;
+      setState(() => shopTab = 1);
+      message('Recompensa adquirida!');
+    } catch (error) {
+      message('Erro ao resgatar: $error');
+    }
+  }
+
+  Future<void> useReward(OwnedReward reward) async {
+    final confirm = await showDialog<bool>(context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Marcar como utilizada?'),
+        content: Text('Você já utilizou "${reward.title}"? Esta ação não pode ser desfeita.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Confirmar uso')),
+        ],
+      ));
+    if (confirm != true) return;
+    try {
+      await db.useOwnedReward(reward.id);
+      await refresh();
+      message('Recompensa marcada como utilizada!');
+    } catch (error) {
+      message('Erro ao utilizar recompensa: $error');
+    }
+  }
+
+  Future<void> hideUsedReward(OwnedReward reward) async {
+    if (!reward.used) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Remover da lista?'),
+        content: Text('Remover "${reward.title}" das recompensas adquiridas? '
+            'O registro de resgate e as moedas gastas serão preservados.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Remover')),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+    try {
+      await db.hideUsedReward(reward.id);
+      await refresh();
+      message('Recompensa removida da lista.');
+    } catch (error) {
+      message('Erro ao remover recompensa: $error');
+    }
+  }
+
+  Widget shopPage() => Column(children: [
+    Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 8), child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Expanded(child: Text('Loja de recompensas',
+            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold))),
+          const Icon(Icons.monetization_on, color: Colors.amber),
+          const SizedBox(width: 5), Text('$coins', style: const TextStyle(fontSize: 20)),
+        ]),
+        const SizedBox(height: 12),
+        SegmentedButton<int>(
+          segments: const [ButtonSegment(value: 0, label: Text('Loja')),
+            ButtonSegment(value: 1, label: Text('Adquiridas'))],
+          selected: {shopTab}, onSelectionChanged: (v) => setState(() => shopTab = v.first),
+        ),
+      ],
+    )),
+    Expanded(child: shopTab == 0 ? ListView(padding: const EdgeInsets.all(16), children: [
+      if (rewards.isEmpty) const Card(child: Padding(padding: EdgeInsets.all(20),
+        child: Text('Nenhuma recompensa na loja. Toque em + para criar uma.'))),
+      ...rewards.map((reward) => Card(child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(children: [
+          ListTile(
+            leading: const Icon(Icons.card_giftcard, color: LifeQuestApp.purple),
+            title: Text(reward.title),
+            subtitle: Text([reward.category, if (reward.description.isNotEmpty) reward.description].join(' • ')),
+            trailing: PopupMenuButton<String>(
+              onSelected: (value) => value == 'edit' ? editReward(reward) : removeReward(reward),
+              itemBuilder: (_) => const [PopupMenuItem(value: 'edit', child: Text('Editar')),
+                PopupMenuItem(value: 'delete', child: Text('Excluir'))],
+            ),
+          ),
+          Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Row(children: [
+            const Icon(Icons.monetization_on, size: 18, color: Colors.amber),
+            Text(' ${reward.price} moedas'),
+            const SizedBox(width: 10),
+            Expanded(child: Text(reward.maxRedemptions == null ? 'Sem limite' :
+              '${reward.redeemedCount}/${reward.maxRedemptions} resgates',
+              textAlign: TextAlign.end, style: const TextStyle(fontSize: 12))),
+            const SizedBox(width: 8),
+            FilledButton(onPressed: coins >= reward.price && reward.available
+              ? () => buyReward(reward) : null,
+              child: Text(!reward.available ? 'Esgotada' : 'Resgatar')),
+          ])),
+        ]),
+      ))),
+    ]) : ListView(padding: const EdgeInsets.all(16), children: [
+      if (ownedRewards.isEmpty) const Card(child: Padding(padding: EdgeInsets.all(20),
+        child: Text('Você ainda não adquiriu recompensas.'))),
+      ...ownedRewards.map((reward) => Card(child: ListTile(
+        leading: Icon(reward.used ? Icons.check_circle : Icons.redeem,
+          color: reward.used ? Colors.green : LifeQuestApp.purple),
+        title: Text(reward.title),
+        subtitle: Text('${reward.used ? 'Utilizada' : 'Disponível'} • Adquirida ${formatDate(reward.purchasedAt)}'
+          '${reward.usedAt == null ? '' : '\nUtilizada ${formatDate(reward.usedAt!)}'}'),
+        isThreeLine: reward.used,
+        trailing: reward.used
+          ? IconButton(
+              tooltip: 'Remover recompensa utilizada',
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () => hideUsedReward(reward),
+            )
+          : TextButton(
+              onPressed: () => useReward(reward), child: const Text('Utilizar')),
+      ))),
+    ])),
+  ]);
 
   String formatDate(DateTime date) => '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year} às ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
 
@@ -240,13 +418,15 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     ),
     body: loading ? const Center(child: CircularProgressIndicator()) : [
       overview(), missionList(),
-      placeholder('Loja', Icons.shopping_bag_outlined),
+      shopPage(),
       placeholder('Calendário', Icons.calendar_month_outlined),
       placeholder('Estatísticas', Icons.bar_chart_outlined),
       historyPage(),
     ][tab],
-    floatingActionButton: tab <= 1 ? FloatingActionButton.extended(
-      onPressed: () => editMission(), icon: const Icon(Icons.add), label: const Text('Nova missão'),
+    floatingActionButton: tab <= 2 ? FloatingActionButton.extended(
+      onPressed: tab == 2 ? () => editReward() : () => editMission(),
+      icon: const Icon(Icons.add),
+      label: Text(tab == 2 ? 'Nova recompensa' : 'Nova missão'),
     ) : null,
     bottomNavigationBar: NavigationBar(
       selectedIndex: tab == 5 ? 1 : tab,
@@ -370,6 +550,86 @@ class _MissionEditorDialogState extends State<MissionEditorDialog> {
         onPressed: () => Navigator.of(context).pop(),
         child: const Text('Cancelar'),
       ),
+      FilledButton(onPressed: save, child: const Text('Salvar')),
+    ],
+  );
+}
+
+class RewardEditorDialog extends StatefulWidget {
+  final Reward? reward;
+  const RewardEditorDialog({super.key, this.reward});
+
+  @override
+  State<RewardEditorDialog> createState() => _RewardEditorDialogState();
+}
+
+class _RewardEditorDialogState extends State<RewardEditorDialog> {
+  final form = GlobalKey<FormState>();
+  late final TextEditingController title;
+  late final TextEditingController description;
+  late final TextEditingController price;
+  late final TextEditingController limit;
+  late String category;
+
+  @override
+  void initState() {
+    super.initState();
+    final reward = widget.reward;
+    title = TextEditingController(text: reward?.title ?? '');
+    description = TextEditingController(text: reward?.description ?? '');
+    price = TextEditingController(text: '${reward?.price ?? 40}');
+    limit = TextEditingController(text: reward?.maxRedemptions?.toString() ?? '');
+    category = reward?.category ?? 'Lazer';
+  }
+
+  @override
+  void dispose() {
+    title.dispose();
+    description.dispose();
+    price.dispose();
+    limit.dispose();
+    super.dispose();
+  }
+
+  void save() {
+    if (!(form.currentState?.validate() ?? false)) return;
+    Navigator.pop(context, Reward(
+      id: widget.reward?.id,
+      title: title.text.trim(), description: description.text.trim(),
+      category: category, price: int.parse(price.text.trim()),
+      maxRedemptions: limit.text.trim().isEmpty ? null : int.parse(limit.text.trim()),
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.reward == null ? 'Nova recompensa' : 'Editar recompensa'),
+    content: SizedBox(width: 400, child: SingleChildScrollView(child: Form(
+      key: form,
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextFormField(controller: title, decoration: const InputDecoration(labelText: 'Nome'),
+          validator: (value) => value == null || value.trim().isEmpty ? 'Informe um nome' : null),
+        TextFormField(controller: description,
+          decoration: const InputDecoration(labelText: 'Descrição (opcional)')),
+        TextFormField(controller: price, keyboardType: TextInputType.number,
+          decoration: const InputDecoration(labelText: 'Preço em moedas'),
+          validator: (value) => (int.tryParse(value?.trim() ?? '') ?? 0) <= 0
+            ? 'Informe um preço maior que zero' : null),
+        TextFormField(controller: limit, keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+            labelText: 'Limite total de resgates (opcional)',
+            helperText: 'Deixe vazio para permitir resgates ilimitados.'),
+          validator: (value) => value == null || value.trim().isEmpty ||
+            ((int.tryParse(value.trim()) ?? 0) > 0) ? null : 'Informe um inteiro positivo'),
+        DropdownButtonFormField<String>(initialValue: category,
+          decoration: const InputDecoration(labelText: 'Categoria'),
+          items: ['Lazer', 'Comida', 'Experiências', 'Pessoal', 'Outros']
+            .map((item) => DropdownMenuItem(value: item, child: Text(item))).toList(),
+          onChanged: (value) { if (value != null) setState(() => category = value); }),
+      ]),
+    ))),
+    actions: [
+      TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
       FilledButton(onPressed: save, child: const Text('Salvar')),
     ],
   );
