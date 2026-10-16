@@ -217,6 +217,12 @@ class DatabaseService {
     await db.delete('missions', where: 'id = ?', whereArgs: [id]);
   }
 
+  /// Inclui recompensas utilizadas e ocultadas, preservando conquistas.
+  Future<int> getTotalRedemptions() async {
+    final db = await database;
+    return Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM owned_rewards')) ?? 0;
+  }
+
   Future<Map<String, int>> getWallet() async {
     final db = await database;
     final rows = await db.query('wallet', where: 'id = 1');

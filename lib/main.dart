@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'database_service.dart';
 import 'mission.dart';
 import 'reward.dart';
+import 'progression.dart';
 
 void main() => runApp(const LifeQuestApp());
 
@@ -42,6 +43,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   List<Reward> rewards = [];
   List<OwnedReward> ownedRewards = [];
   int shopTab = 0;
+  int totalRedemptions = 0;
 
   @override
   void initState() {
@@ -56,6 +58,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       final records = await db.getHistory();
       final rewardItems = await db.getRewards();
       final purchases = await db.getOwnedRewards();
+      final redemptions = await db.getTotalRedemptions();
       if (!mounted) return;
       setState(() {
         missions = items;
@@ -64,6 +67,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
         history = records;
         rewards = rewardItems;
         ownedRewards = purchases;
+        totalRedemptions = redemptions;
         loading = false;
       });
     } catch (error) {
@@ -115,9 +119,15 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     );
     if (result == null) return;
     try {
+      final beforeXp = xp;
+      final beforeCompletions = history.length;
       final completed = await db.updateProgress(mission, result);
       await refresh();
-      if (completed) message('Missão concluída! +${mission.points} moedas e XP');
+      if (completed && mounted) {
+        message('Missão concluída! +${mission.points} moedas e XP');
+        showProgressAlerts(beforeXp: beforeXp, beforeCompletions: beforeCompletions,
+          beforePurchases: totalRedemptions);
+      }
     } catch (error) {
       message('Erro ao atualizar progresso: $error');
     }
@@ -187,8 +197,11 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       ));
     if (confirm != true) return;
     try {
+      final previousPurchases = totalRedemptions;
       await db.redeemReward(reward.id!);
       await refresh();
+      if (mounted) showProgressAlerts(beforeXp: xp, beforeCompletions: history.length,
+        beforePurchases: previousPurchases);
       if (!mounted) return;
       setState(() => shopTab = 1);
       message('Recompensa adquirida!');
@@ -241,6 +254,89 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     } catch (error) {
       message('Erro ao remover recompensa: $error');
     }
+  }
+
+  void showProgressAlerts({required int beforeXp, required int beforeCompletions,
+      required int beforePurchases}) {
+    if (!mounted) return;
+    final oldLevel = levelForXp(beforeXp).level;
+    final newLevel = levelForXp(xp).level;
+    final oldBadges = achievementsFor(xp: beforeXp, completions: beforeCompletions,
+      purchases: beforePurchases);
+    final newBadges = achievementsFor(xp: xp, completions: history.length,
+      purchases: totalRedemptions);
+    final unlocked = <String>[];
+    for (var i = 0; i < newBadges.length; i++) {
+      if (!oldBadges[i].unlocked && newBadges[i].unlocked) unlocked.add(newBadges[i].title);
+    }
+    if (newLevel == oldLevel && unlocked.isEmpty) return;
+    final details = [
+      if (newLevel > oldLevel) 'Você alcançou o nível $newLevel!',
+      if (unlocked.isNotEmpty) 'Conquistas desbloqueadas: ${unlocked.join(', ')}',
+    ].join('\n\n');
+    // Notificação interna: não exige permissões do Android.
+    showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+      title: const Row(children: [Icon(Icons.emoji_events, color: Colors.amber),
+        SizedBox(width: 10), Text('Parabéns!')]),
+      content: Text(details),
+      actions: [FilledButton(onPressed: () => Navigator.pop(dialogContext),
+        child: const Text('Continuar'))],
+    ));
+  }
+
+  Widget profilePage() {
+    final level = levelForXp(xp);
+    final achievements = achievementsFor(xp: xp, completions: history.length,
+      purchases: totalRedemptions);
+    final unlocked = achievements.where((a) => a.unlocked).length;
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      const Text('Meu perfil', style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 14),
+      Card(child: Padding(padding: const EdgeInsets.all(20), child: Column(children: [
+        const CircleAvatar(radius: 34, backgroundColor: LifeQuestApp.purple,
+          child: Icon(Icons.person, size: 36, color: Colors.white)),
+        const SizedBox(height: 12),
+        Text('Nível ${level.level}', style: const TextStyle(fontSize: 27, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Text('$xp XP total • ${xp - level.currentFloor}/${level.earnedInLevel} XP neste nível'),
+        const SizedBox(height: 12),
+        LinearProgressIndicator(value: level.progress(xp), minHeight: 10,
+          borderRadius: BorderRadius.circular(10)),
+        const SizedBox(height: 8),
+        Text('Próximo nível em ${level.nextFloor - xp} XP',
+          style: const TextStyle(color: Colors.white70)),
+      ]))),
+      const SizedBox(height: 12),
+      Row(children: [
+        Expanded(child: Card(child: Padding(padding: const EdgeInsets.all(14),
+          child: Column(children: [const Icon(Icons.task_alt, color: LifeQuestApp.purple),
+            Text('${history.length}', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+            const Text('Conclusões')])))),
+        Expanded(child: Card(child: Padding(padding: const EdgeInsets.all(14),
+          child: Column(children: [const Icon(Icons.card_giftcard, color: LifeQuestApp.purple),
+            Text('$totalRedemptions', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+            const Text('Resgates')])))),
+      ]),
+      const SizedBox(height: 20),
+      Text('Conquistas ($unlocked/${achievements.length})',
+        style: const TextStyle(fontSize: 21, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 10),
+      ...achievements.map((a) => Card(child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7), child: Column(children: [
+          ListTile(
+            leading: Icon(a.unlocked ? Icons.emoji_events : a.icon,
+              color: a.unlocked ? Colors.amber : Colors.white54),
+            title: Text(a.title),
+            subtitle: Text(a.description),
+            trailing: a.unlocked ? const Icon(Icons.check_circle, color: Colors.green)
+              : Text('${a.current}/${a.goal}', style: const TextStyle(color: Colors.white70)),
+          ),
+          if (!a.unlocked) Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: LinearProgressIndicator(value: a.progress, minHeight: 5,
+              borderRadius: BorderRadius.circular(8))),
+        ]),
+      ))),
+    ]);
   }
 
   Widget shopPage() => Column(children: [
@@ -382,6 +478,14 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
             Text('$xp', style: const TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
             const Text('XP total')])))),
       ]),
+      const SizedBox(height: 14),
+      Card(child: ListTile(
+        leading: const Icon(Icons.emoji_events, color: Colors.amber),
+        title: Text('Nível ${levelForXp(xp).level}'),
+        subtitle: Text('${levelForXp(xp).nextFloor - xp} XP até o próximo nível'),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => setState(() => tab = 6),
+      )),
       const SizedBox(height: 20),
       Text('Missões ($finished/${missions.length} concluídas)',
         style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
@@ -411,17 +515,21 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
-      title: Text(tab == 5 ? 'Histórico' : 'LifeQuest'),
+      title: Text(tab == 5 ? 'Histórico' : tab == 6 ? 'Perfil' : 'LifeQuest'),
       backgroundColor: LifeQuestApp.bg,
-      actions: [IconButton(tooltip: 'Histórico', icon: const Icon(Icons.history),
-        onPressed: () => setState(() => tab = 5))],
+      actions: [
+        IconButton(tooltip: 'Perfil e conquistas', icon: const Icon(Icons.person_outline),
+          onPressed: () => setState(() => tab = 6)),
+        IconButton(tooltip: 'Histórico', icon: const Icon(Icons.history),
+          onPressed: () => setState(() => tab = 5)),
+      ],
     ),
     body: loading ? const Center(child: CircularProgressIndicator()) : [
       overview(), missionList(),
       shopPage(),
       placeholder('Calendário', Icons.calendar_month_outlined),
       placeholder('Estatísticas', Icons.bar_chart_outlined),
-      historyPage(),
+      historyPage(), profilePage(),
     ][tab],
     floatingActionButton: tab <= 2 ? FloatingActionButton.extended(
       onPressed: tab == 2 ? () => editReward() : () => editMission(),
@@ -429,7 +537,7 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
       label: Text(tab == 2 ? 'Nova recompensa' : 'Nova missão'),
     ) : null,
     bottomNavigationBar: NavigationBar(
-      selectedIndex: tab == 5 ? 1 : tab,
+      selectedIndex: tab >= 5 ? 0 : tab,
       onDestinationSelected: (index) => setState(() => tab = index),
       destinations: const [
         NavigationDestination(icon: Icon(Icons.home_outlined), label: 'Início'),
