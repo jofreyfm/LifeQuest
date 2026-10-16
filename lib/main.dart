@@ -459,6 +459,37 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
             ],
           ),
         ),
+        if (streak.inactiveToday)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: LifeQuestApp.purple.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: LifeQuestApp.purple.withValues(alpha: 0.35)),
+              ),
+              child: Row(children: [
+                const Icon(Icons.pause_circle_outline, color: LifeQuestApp.purple),
+                const SizedBox(width: 10),
+                const Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Missão pausada', style: TextStyle(fontWeight: FontWeight.bold)),
+                    SizedBox(height: 3),
+                    Text('Você está em um período inativo. O progresso fica bloqueado até o fim desse período ou até removê-lo.',
+                      style: TextStyle(fontSize: 12)),
+                  ],
+                )),
+                IconButton(
+                  tooltip: 'Ver ou alterar períodos inativos',
+                  onPressed: () => setState(() => tab = 7),
+                  icon: const Icon(Icons.settings_outlined),
+                ),
+              ]),
+            ),
+          ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Row(children: [
