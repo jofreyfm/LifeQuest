@@ -5,6 +5,7 @@ import 'database_service.dart';
 import 'mission.dart';
 import 'reward.dart';
 import 'progression.dart';
+import 'notification_service.dart';
 
 void main() => runApp(const LifeQuestApp());
 
@@ -62,7 +63,10 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
   @override
   void initState() {
     super.initState();
-    refresh().then((_) => checkReminders());
+    refresh().then((_) async {
+  await checkReminders();
+  await syncNativeReminders();
+});
     reminderTimer = Timer.periodic(const Duration(seconds: 15), (_) => checkReminders());
   }
 
@@ -91,7 +95,29 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     }
   }
 
+Future<void> syncNativeReminders({
+  bool requestPermissions = false,
+}) async {
+  try {
+    final service = NotificationService.instance;
 
+    await service.initialize();
+
+    if (requestPermissions) {
+      await service.requestPermissions();
+    }
+
+    await service.syncReminders(
+      reminders: await db.getReminders(),
+      missions: await db.getMissions(),
+      inactivePeriods: await db.getInactivePeriods(),
+    );
+  } catch (error) {
+    if (mounted) {
+      message('Erro ao atualizar notificações: $error');
+    }
+  }
+}
   Future<void> refresh() async {
     try {
       final items = await db.getMissions();
