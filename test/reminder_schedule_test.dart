@@ -42,6 +42,17 @@ void main() {
       expect(result.map((item) => item.notificationId), [100, 102, 202]);
     });
 
+    test('uses the scheduled notification id for a due reminder', () {
+      expect(
+        ReminderSchedule.notificationIdFor(
+          missionId: 2,
+          date: DateTime(2026, 10, 29),
+          scheduleAnchor: now,
+        ),
+        202,
+      );
+    });
+
     test('limits the schedule horizon and notification count', () {
       final result = ReminderSchedule.plan(
         now: now,

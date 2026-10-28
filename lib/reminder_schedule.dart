@@ -20,6 +20,21 @@ class ReminderScheduleEntry {
 class ReminderSchedule {
   const ReminderSchedule._();
 
+  static int notificationIdFor({
+    required int missionId,
+    required DateTime date,
+    required DateTime scheduleAnchor,
+  }) {
+    final scheduledDay = DateTime.utc(date.year, date.month, date.day);
+    final anchorDay = DateTime.utc(
+      scheduleAnchor.year,
+      scheduleAnchor.month,
+      scheduleAnchor.day,
+    );
+    final dayOffset = scheduledDay.difference(anchorDay).inDays;
+    return missionId * 100 + dayOffset;
+  }
+
   static List<ReminderScheduleEntry> plan({
     required DateTime now,
     required List<Mission> missions,
@@ -92,7 +107,11 @@ class ReminderSchedule {
         result.add(
           ReminderScheduleEntry(
             missionId: reminder.mission.id!,
-            notificationId: reminder.mission.id! * 100 + offset,
+            notificationId: notificationIdFor(
+              missionId: reminder.mission.id!,
+              date: date,
+              scheduleAnchor: today,
+            ),
             title: reminder.mission.title,
             dateKey: dateKey,
             scheduledAt: scheduledAt,

@@ -80,8 +80,18 @@ class _LifeQuestHomeState extends State<LifeQuestHome> {
     if (!mounted || loading) return;
     try {
       if (streak.inactiveToday) return;
-      final due = await db.consumeDueReminders(DateTime.now());
+      final now = DateTime.now();
+      final due = await db.consumeDueReminders(now);
       if (!mounted || due.isEmpty) return;
+      try {
+        await NotificationService.instance.showDueReminders(
+          missionIds: due,
+          missions: missions,
+          now: now,
+        );
+      } catch (error) {
+        debugPrint('Erro ao exibir notificação do lembrete: $error');
+      }
       final names = {for (final mission in missions) mission.id: mission.title};
       setState(() {
         for (final id in due) {

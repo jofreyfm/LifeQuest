@@ -23,6 +23,7 @@ class NotificationService extends WidgetsBindingObserver {
   Map<int, Map<String, Object?>>? _lastReminders;
   List<Mission>? _lastMissions;
   List<InactivePeriod>? _lastInactivePeriods;
+  DateTime? _scheduleAnchorDate;
 
   static const String _payloadPrefix = 'lifequest_reminder:';
   static const int _maxScheduledNotifications = 350;
@@ -80,6 +81,62 @@ class NotificationService extends WidgetsBindingObserver {
       }),
     );
   }
+
+  Future<void> showDueReminders({
+    required List<int> missionIds,
+    required List<Mission> missions,
+    required DateTime now,
+  }) async {
+    await initialize();
+
+    final android = _plugin
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
+    if (android == null) return;
+
+    final date = DateTime(now.year, now.month, now.day);
+    final scheduleAnchor = _scheduleAnchorDate ?? date;
+    final dateKey = _dateKey(date);
+    final missionById = {
+      for (final mission in missions)
+        if (mission.id != null) mission.id!: mission,
+    };
+    final activeNotifications = await _plugin.getActiveNotifications();
+
+    for (final missionId in missionIds) {
+      final mission = missionById[missionId];
+      if (mission == null) continue;
+
+      final notificationId = ReminderSchedule.notificationIdFor(
+        missionId: missionId,
+        date: date,
+        scheduleAnchor: scheduleAnchor,
+      );
+      final payload = '$_payloadPrefix$missionId:$dateKey';
+      if (activeNotifications.any(
+        (notification) =>
+            notification.id == notificationId &&
+            notification.payload == payload,
+      )) {
+        continue;
+      }
+
+      await _plugin.cancel(id: notificationId);
+      await _plugin.show(
+        id: notificationId,
+        title: mission.title,
+        body: 'Está na hora de cumprir sua missão no LifeQuest.',
+        notificationDetails: _details,
+        payload: payload,
+      );
+    }
+  }
+
+  String _dateKey(DateTime date) =>
+      '${date.year.toString().padLeft(4, '0')}-'
+      '${date.month.toString().padLeft(2, '0')}-'
+      '${date.day.toString().padLeft(2, '0')}';
 
   Future<void> requestPermissions() async {
     await initialize();
@@ -139,6 +196,7 @@ class NotificationService extends WidgetsBindingObserver {
     }
 
     final now = tz.TZDateTime.now(tz.local);
+    _scheduleAnchorDate = DateTime(now.year, now.month, now.day);
     final schedule = ReminderSchedule.plan(
       now: now,
       missions: missions,
