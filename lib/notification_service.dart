@@ -185,50 +185,39 @@ class NotificationService extends WidgetsBindingObserver {
     required List<Mission> missions,
     required List<InactivePeriod> inactivePeriods,
   }) async {
-    await initialize();
+    try {
+      await initialize();
 
-    // Cancela agendamentos anteriores para evitar duplicatas.
-    final pending = await _plugin.pendingNotificationRequests();
-    for (final notification in pending) {
-      if (notification.payload?.startsWith(_payloadPrefix) ?? false) {
-        await _plugin.cancel(id: notification.id);
+      // Cancela agendamentos anteriores para evitar duplicatas.
+      final pending = await _plugin.pendingNotificationRequests();
+      for (final notification in pending) {
+        if (notification.payload?.startsWith(_payloadPrefix) ?? false) {
+          await _plugin.cancel(id: notification.id);
+        }
       }
-    }
 
-    final now = tz.TZDateTime.now(tz.local);
-    _scheduleAnchorDate = DateTime(now.year, now.month, now.day);
-    final schedule = ReminderSchedule.plan(
-      now: now,
-      missions: missions,
-      reminders: reminders,
-      inactivePeriods: inactivePeriods,
-      maxScheduledNotifications: _maxScheduledNotifications,
-      maxDaysAhead: _maxDaysAhead,
-    );
-
-    for (final entry in schedule) {
-      final scheduledDate = tz.TZDateTime(
-        tz.local,
-        entry.scheduledAt.year,
-        entry.scheduledAt.month,
-        entry.scheduledAt.day,
-        entry.scheduledAt.hour,
-        entry.scheduledAt.minute,
+      final now = tz.TZDateTime.now(tz.local);
+      _scheduleAnchorDate = DateTime(now.year, now.month, now.day);
+      final schedule = ReminderSchedule.plan(
+        now: now,
+        missions: missions,
+        reminders: reminders,
+        inactivePeriods: inactivePeriods,
+        maxScheduledNotifications: _maxScheduledNotifications,
+        maxDaysAhead: _maxDaysAhead,
       );
-      final payload = '$_payloadPrefix${entry.missionId}:${entry.dateKey}';
 
-      try {
-        await _plugin.zonedSchedule(
-          id: entry.notificationId,
-          title: entry.title,
-          body: 'Está na hora de cumprir sua missão no LifeQuest.',
-          scheduledDate: scheduledDate,
-          notificationDetails: _details,
-          androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-          payload: payload,
+      for (final entry in schedule) {
+        final scheduledDate = tz.TZDateTime(
+          tz.local,
+          entry.scheduledAt.year,
+          entry.scheduledAt.month,
+          entry.scheduledAt.day,
+          entry.scheduledAt.hour,
+          entry.scheduledAt.minute,
         );
-      } catch (_) {
-        // Se alarmes exatos não estiverem disponíveis, usa modo aproximado.
+        final payload = '$_payloadPrefix${entry.missionId}:${entry.dateKey}';
+
         try {
           await _plugin.zonedSchedule(
             id: entry.notificationId,
@@ -236,14 +225,30 @@ class NotificationService extends WidgetsBindingObserver {
             body: 'Está na hora de cumprir sua missão no LifeQuest.',
             scheduledDate: scheduledDate,
             notificationDetails: _details,
-            androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+            androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
             payload: payload,
           );
-        } catch (e) {
-          // Se ambos falharem, loga o erro mas não propaga para não quebrar o agendamento dos outros lembretes.
-          debugPrint('Falha ao agendar lembrete ${entry.missionId}: $e');
+        } catch (_) {
+          // Se alarmes exatos não estiverem disponíveis, usa modo aproximado.
+          try {
+            await _plugin.zonedSchedule(
+              id: entry.notificationId,
+              title: entry.title,
+              body: 'Está na hora de cumprir sua missão no LifeQuest.',
+              scheduledDate: scheduledDate,
+              notificationDetails: _details,
+              androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+              payload: payload,
+            );
+          } catch (e) {
+            // Se ambos falharem, loga o erro mas não propaga para não quebrar o agendamento dos outros lembretes.
+            debugPrint('Falha ao agendar lembrete ${entry.missionId}: $e');
+          }
         }
       }
+    } catch (e) {
+      // Qualquer erro na inicialização, cancelamento ou planejamento não propaga para a UI.
+      debugPrint('Erro na sincronização de lembretes: $e');
     }
   }
 }
