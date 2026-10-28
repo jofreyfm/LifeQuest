@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
@@ -5,8 +8,9 @@ import 'package:timezone/timezone.dart' as tz;
 
 import 'database_service.dart';
 import 'mission.dart';
+import 'reminder_schedule.dart';
 
-class NotificationService {
+class NotificationService extends WidgetsBindingObserver {
   NotificationService._();
 
   static final NotificationService instance = NotificationService._();
@@ -15,6 +19,10 @@ class NotificationService {
       FlutterLocalNotificationsPlugin();
 
   bool _initialized = false;
+  Future<void> _syncQueue = Future<void>.value();
+  Map<int, Map<String, Object?>>? _lastReminders;
+  List<Mission>? _lastMissions;
+  List<InactivePeriod>? _lastInactivePeriods;
 
   static const String _payloadPrefix = 'lifequest_reminder:';
   static const int _maxScheduledNotifications = 350;
@@ -31,27 +39,55 @@ class NotificationService {
   );
 
   Future<void> initialize() async {
-    if (_initialized) return;
+    if (!_initialized) {
+      tz_data.initializeTimeZones();
 
-    tz_data.initializeTimeZones();
+      await _plugin.initialize(
+        settings: const InitializationSettings(
+          android: AndroidInitializationSettings('ic_launcher'),
+        ),
+      );
 
+      WidgetsBinding.instance.addObserver(this);
+      _initialized = true;
+    }
+
+    await _updateLocalTimezone();
+  }
+
+  Future<void> _updateLocalTimezone() async {
     final localTimezone = await FlutterTimezone.getLocalTimezone();
     tz.setLocalLocation(tz.getLocation(localTimezone.identifier));
+  }
 
-    await _plugin.initialize(
-      settings: const InitializationSettings(
-        android: AndroidInitializationSettings('ic_launcher'),
-      ),
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed ||
+        !_initialized ||
+        _lastReminders == null ||
+        _lastMissions == null ||
+        _lastInactivePeriods == null) {
+      return;
+    }
+
+    unawaited(
+      syncReminders(
+        reminders: _lastReminders!,
+        missions: _lastMissions!,
+        inactivePeriods: _lastInactivePeriods!,
+      ).catchError((Object error) {
+        debugPrint('Erro ao atualizar lembretes: $error');
+      }),
     );
-
-    _initialized = true;
   }
 
   Future<void> requestPermissions() async {
     await initialize();
 
-    final android = _plugin.resolvePlatformSpecificImplementation<
-        AndroidFlutterLocalNotificationsPlugin>();
+    final android = _plugin
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
 
     await android?.requestNotificationsPermission();
     await android?.requestExactAlarmsPermission();
@@ -61,148 +97,90 @@ class NotificationService {
     required Map<int, Map<String, Object?>> reminders,
     required List<Mission> missions,
     required List<InactivePeriod> inactivePeriods,
+  }) {
+    final reminderSnapshot = {
+      for (final entry in reminders.entries)
+        entry.key: Map<String, Object?>.from(entry.value),
+    };
+    final missionSnapshot = List<Mission>.of(missions);
+    final inactiveSnapshot = List<InactivePeriod>.of(inactivePeriods);
+    _lastReminders = reminderSnapshot;
+    _lastMissions = missionSnapshot;
+    _lastInactivePeriods = inactiveSnapshot;
+
+    final nextSync = _syncQueue
+        .catchError((Object error) {
+          debugPrint('Erro em sincronização anterior: $error');
+        })
+        .then(
+          (_) => _syncSnapshot(
+            reminders: reminderSnapshot,
+            missions: missionSnapshot,
+            inactivePeriods: inactiveSnapshot,
+          ),
+        );
+    _syncQueue = nextSync;
+    return nextSync;
+  }
+
+  Future<void> _syncSnapshot({
+    required Map<int, Map<String, Object?>> reminders,
+    required List<Mission> missions,
+    required List<InactivePeriod> inactivePeriods,
   }) async {
     await initialize();
 
-    // Cancela os agendamentos anteriores deste serviço para evitar duplicatas.
+    // Cancela agendamentos anteriores para evitar duplicatas.
     final pending = await _plugin.pendingNotificationRequests();
-
     for (final notification in pending) {
       if (notification.payload?.startsWith(_payloadPrefix) ?? false) {
         await _plugin.cancel(id: notification.id);
       }
     }
 
-    final missionsById = <int, Mission>{
-      for (final mission in missions)
-        if (mission.id != null) mission.id!: mission,
-    };
-
-    final activeReminders = <_ReminderItem>[];
-
-    for (final entry in reminders.entries) {
-      final mission = missionsById[entry.key];
-      final reminder = entry.value;
-
-      if (mission == null) continue;
-      if (reminder['enabled'] == 0) continue;
-
-      // Uma missão única já concluída não precisa de novos avisos.
-      if (mission.frequency == 'Única' && mission.completed) {
-        continue;
-      }
-
-      final hour = reminder['hour'] as int?;
-      final minute = reminder['minute'] as int?;
-
-      if (hour == null || minute == null) continue;
-
-      if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-        continue;
-      }
-
-      activeReminders.add(
-        _ReminderItem(
-          mission: mission,
-          hour: hour,
-          minute: minute,
-        ),
-      );
-    }
-
-    if (activeReminders.isEmpty) return;
-
-    // Limita a quantidade de alarmes pendentes no Android.
-    activeReminders.sort(
-      (a, b) => a.mission.id!.compareTo(b.mission.id!),
+    final now = tz.TZDateTime.now(tz.local);
+    final schedule = ReminderSchedule.plan(
+      now: now,
+      missions: missions,
+      reminders: reminders,
+      inactivePeriods: inactivePeriods,
+      maxScheduledNotifications: _maxScheduledNotifications,
+      maxDaysAhead: _maxDaysAhead,
     );
 
-    if (activeReminders.length > _maxScheduledNotifications) {
-      activeReminders.removeRange(
-        _maxScheduledNotifications,
-        activeReminders.length,
+    for (final entry in schedule) {
+      final scheduledDate = tz.TZDateTime(
+        tz.local,
+        entry.scheduledAt.year,
+        entry.scheduledAt.month,
+        entry.scheduledAt.day,
+        entry.scheduledAt.hour,
+        entry.scheduledAt.minute,
       );
-    }
+      final payload = '$_payloadPrefix${entry.missionId}:${entry.dateKey}';
 
-    final daysAhead =
-        (_maxScheduledNotifications ~/ activeReminders.length)
-            .clamp(1, _maxDaysAhead)
-            .toInt();
-
-    final now = tz.TZDateTime.now(tz.local);
-    final today = DateTime(now.year, now.month, now.day);
-
-    for (var offset = 0; offset < daysAhead; offset++) {
-      final date = today.add(Duration(days: offset));
-      final dateKey = _dateKey(date);
-
-      final inactive = inactivePeriods.any(
-        (period) =>
-            period.startDay.compareTo(dateKey) <= 0 &&
-            period.endDay.compareTo(dateKey) >= 0,
-      );
-
-      if (inactive) continue;
-
-      for (final reminder in activeReminders) {
-        final scheduledDate = tz.TZDateTime(
-          tz.local,
-          date.year,
-          date.month,
-          date.day,
-          reminder.hour,
-          reminder.minute,
+      try {
+        await _plugin.zonedSchedule(
+          id: entry.notificationId,
+          title: entry.title,
+          body: 'Está na hora de cumprir sua missão no LifeQuest.',
+          scheduledDate: scheduledDate,
+          notificationDetails: _details,
+          androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+          payload: payload,
         );
-
-        // Nunca agenda um horário que já passou.
-        if (!scheduledDate.isAfter(now)) continue;
-
-        // Cada missão recebe um ID diferente para cada dia.
-        final notificationId = reminder.mission.id! * 100 + offset;
-
-        final payload =
-            '$_payloadPrefix${reminder.mission.id}:$dateKey';
-
-        try {
-          await _plugin.zonedSchedule(
-  id: notificationId,
-  title: reminder.mission.title,
-  body: 'Está na hora de cumprir sua missão no LifeQuest.',
-  scheduledDate: scheduledDate,
-  notificationDetails: _details,
-  androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-  payload: payload,
-);
-        } catch (_) {
-          // Se o Android não permitir alarmes exatos, tenta o modo aproximado.
-          await _plugin.zonedSchedule(
-  id: notificationId,
-  title: reminder.mission.title,
-  body: 'Está na hora de cumprir sua missão no LifeQuest.',
-  scheduledDate: scheduledDate,
-  notificationDetails: _details,
-  androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-  payload: payload,
-);
-        }
+      } catch (_) {
+        // Se alarmes exatos não estiverem disponíveis, usa modo aproximado.
+        await _plugin.zonedSchedule(
+          id: entry.notificationId,
+          title: entry.title,
+          body: 'Está na hora de cumprir sua missão no LifeQuest.',
+          scheduledDate: scheduledDate,
+          notificationDetails: _details,
+          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+          payload: payload,
+        );
       }
     }
   }
-
-  String _dateKey(DateTime date) =>
-      '${date.year.toString().padLeft(4, '0')}-'
-      '${date.month.toString().padLeft(2, '0')}-'
-      '${date.day.toString().padLeft(2, '0')}';
-}
-
-class _ReminderItem {
-  final Mission mission;
-  final int hour;
-  final int minute;
-
-  const _ReminderItem({
-    required this.mission,
-    required this.hour,
-    required this.minute,
-  });
 }
