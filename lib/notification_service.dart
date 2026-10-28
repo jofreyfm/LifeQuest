@@ -229,15 +229,20 @@ class NotificationService extends WidgetsBindingObserver {
         );
       } catch (_) {
         // Se alarmes exatos não estiverem disponíveis, usa modo aproximado.
-        await _plugin.zonedSchedule(
-          id: entry.notificationId,
-          title: entry.title,
-          body: 'Está na hora de cumprir sua missão no LifeQuest.',
-          scheduledDate: scheduledDate,
-          notificationDetails: _details,
-          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-          payload: payload,
-        );
+        try {
+          await _plugin.zonedSchedule(
+            id: entry.notificationId,
+            title: entry.title,
+            body: 'Está na hora de cumprir sua missão no LifeQuest.',
+            scheduledDate: scheduledDate,
+            notificationDetails: _details,
+            androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+            payload: payload,
+          );
+        } catch (e) {
+          // Se ambos falharem, loga o erro mas não propaga para não quebrar o agendamento dos outros lembretes.
+          debugPrint('Falha ao agendar lembrete ${entry.missionId}: $e');
+        }
       }
     }
   }
